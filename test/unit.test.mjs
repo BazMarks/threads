@@ -1,0 +1,549 @@
+// Unit tests. Each name starts with its area, so --test-name-pattern "^<area>:" picks one step's cases.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { tmpDir, REPO } from './helpers.mjs';
+import { makeHome, userLine, assistantLine, toolUse, toolResult, notification, sid } from './fixtures.mjs';
+import { writeFileAtomic, appendJsonl, one, addDays, dayKey, startOfDay } from '../lib/util.mjs';
+import { createTail } from '../lib/tail.mjs';
+import * as source from '../lib/sources/index.mjs';
+import { dedupe, usdOf, burstsOf, createUsageCache, loadPrices, mainFamily } from '../lib/usage.mjs';
+import { sessionTools, folderClosed, BG_MAX_MS } from '../lib/sesstools.mjs';
+import {
+  sessionState, sessionShown, weekStart, markSeen, markPark, parseSeen, parsePark, applyPark, parseLive, pruneLive, nodeId, readLiveDir,
+} from '../lib/states.mjs';
+import { main as statusMain, writeLive } from '../hooks/status.mjs';
+import { collect, buildBrain } from '../lib/brain.mjs';
+import { loadDetails, spendOf } from '../lib/details.mjs';
+import { countUsage, mergeHints } from '../lib/toolusage.mjs';
+import { listTools, parseCatalog } from '../lib/tools.mjs';
+import { readTeam, modelsFor, setFrontmatter, setTeam } from '../lib/team.mjs';
+
+const MIN = 60000, HOUR = 3600000, DAY = 86400000;
+const NOW = new Date(2026, 2, 11, 15, 0, 0).getTime(); // a Wednesday afternoon, local time
+const jl = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+const touch = (f, t) => fs.utimesSync(f, new Date(t), new Date(t));
+const PRICES = loadPrices();
+
+// ---------------------------------------------------------------- util
+test('util: atomic write reads back', async () => {
+  const f = path.join(tmpDir(), 'a', 'b.txt');
+  await writeFileAtomic(f, 'hello\n');
+  assert.equal(fs.readFileSync(f, 'utf8'), 'hello\n');
+  await writeFileAtomic(f, 'again\n');
+  assert.equal(fs.readFileSync(f, 'utf8'), 'again\n');
+});
+test('util: appendJsonl makes the folder', async () => {
+  const f = path.join(tmpDir(), 'x', 'y', 'log.jsonl');
+  await appendJsonl(f, { a: 1 });
+  await appendJsonl(f, { a: 2 });
+  assert.deepEqual(fs.readFileSync(f, 'utf8').trim().split('\n').map((l) => JSON.parse(l).a), [1, 2]);
+});
+test('util: one strips control characters', () => {
+  assert.equal(one('a\u0000b\n\tc   d', 40), 'a b c d');
+  assert.equal(one('abcdef', 3), 'abc');
+  assert.equal(one(null, 5), '');
+});
+test('util: addDays across a month end', () => {
+  assert.equal(addDays('2026-01-31', 1), '2026-02-01');
+  assert.equal(addDays('2026-03-01', -1), '2026-02-28');
+  assert.equal(addDays('bad', 1), null);
+});
+
+// ---------------------------------------------------------------- tail
+test('tail: whole lines only, a half line waits', async () => {
+  const f = path.join(tmpDir(), 't.jsonl');
+  fs.writeFileSync(f, 'one\ntwo\nthr');
+  const t = createTail();
+  const got = [];
+  await t.read(f, null, (l) => got.push(l));
+  assert.deepEqual(got, ['one', 'two']);
+  fs.appendFileSync(f, 'ee\r\n');
+  await t.read(f, null, (l) => got.push(l));
+  assert.deepEqual(got, ['one', 'two', 'three']);
+});
+test('tail: appended bytes are read once', async () => {
+  const f = path.join(tmpDir(), 't.jsonl');
+  fs.writeFileSync(f, 'a\n');
+  const t = createTail();
+  const got = [];
+  await t.read(f, null, (l) => got.push(l));
+  await t.read(f, null, (l) => got.push(l));
+  fs.appendFileSync(f, 'b\n');
+  await Promise.all([t.read(f, null, (l) => got.push(l)), t.read(f, null, (l) => got.push(l))]);
+  assert.deepEqual(got, ['a', 'b']);
+});
+test('tail: a shorter file resets', async () => {
+  const f = path.join(tmpDir(), 't.jsonl');
+  fs.writeFileSync(f, 'long line one\nlong line two\n');
+  const t = createTail();
+  let got = [];
+  await t.read(f, null, (l) => got.push(l));
+  fs.writeFileSync(f, 'new\n');
+  let reset = 0;
+  const r = await t.read(f, null, (l) => got.push(l), () => { reset++; got = []; });
+  assert.equal(r.reset, true);
+  assert.equal(reset, 1);
+  assert.deepEqual(got, ['new']);
+});
+test('tail: a missing file does not throw', async () => {
+  const t = createTail();
+  const r = await t.read(path.join(tmpDir(), 'nope.jsonl'), null, () => {});
+  assert.equal(r.reset, false);
+});
+
+// ---------------------------------------------------------------- source
+const C0 = { session: sid(1), cwd: path.join('w', 'p'), entry: 'cli' };
+test('source: usageOfLine reads counters, the 1-hour part, side and effort', () => {
+  const line = JSON.stringify({ ...assistantLine(C0, NOW, { id: 'msg_1', effort: 'high' }), isSidechain: true });
+  const r = source.usageOfLine(line, 'f');
+  assert.deepEqual(r, ['msg_1', NOW, 'claude-opus-4-1', 100, 50, 1000, 5000, true, 'high', 400]);
+  const odd = JSON.parse(JSON.stringify(assistantLine(C0, NOW, { id: 'msg_2' })));
+  odd.effort = 'Not A Word!';
+  assert.equal(source.usageOfLine(JSON.stringify(odd), 'f')[8], '');
+  const syn = assistantLine(C0, NOW, { model: '<synthetic>' });
+  assert.equal(source.usageOfLine(JSON.stringify(syn), 'f'), null);
+  assert.equal(source.usageOfLine(JSON.stringify(userLine(C0, NOW, 'usage')), 'f'), null);
+});
+test('source: toolLabel names skills, helpers, MCP servers and tools', () => {
+  assert.deepEqual(source.toolLabel('Skill', { skill: 'plug:my-skill' }), { k: 'skill', name: 'my-skill' });
+  assert.deepEqual(source.toolLabel('Agent', { subagent_type: 'reviewer' }), { k: 'helper', name: 'reviewer' });
+  assert.deepEqual(source.toolLabel('mcp__claude_ai_Some_Server__do', {}), { k: 'mcp', name: 'Some Server' });
+  assert.deepEqual(source.toolLabel('mcp__plugin_x_srv__do', {}), { k: 'mcp', name: 'srv' });
+  assert.equal(source.toolLabel('A_very_long_tool_name_that_goes_on', {}).name.length, 24);
+});
+test('source: eventsOfLine counts skills, helpers, MCP and catalog matches, never results', () => {
+  const a = assistantLine(C0, NOW, { content: [toolUse('Skill', { skill: 'pl:Demo-Skill' }, 'toolu_1'), toolUse('Agent', { subagent_type: 'Reviewer' }, 'toolu_2'),
+    toolUse('mcp__fixture_mcp__ping', {}, 'toolu_3'), toolUse('Bash', { command: 'node tools/resize.mjs' }, 'toolu_4')] });
+  const ev = source.eventsOfLine(JSON.stringify(a), ['resize.mjs']);
+  assert.deepEqual(ev.map(([k, n]) => [k, n]), [['skill', 'demo-skill'], ['helper', 'reviewer'], ['mcp', 'fixturemcp'], ['tool', 'resize.mjs']]);
+  const res = toolResult(C0, NOW, 'toolu_4', JSON.stringify({ type: 'tool_use', name: 'Skill', input: { skill: 'x' } }));
+  assert.deepEqual(source.eventsOfLine(JSON.stringify(res), ['resize.mjs']), []);
+});
+test('source: sessionHead reads the entry point and the working folder', async () => {
+  const d = tmpDir();
+  const mk = (name, entry) => { const f = path.join(d, name); fs.writeFileSync(f, jl([{ type: 'x' }, userLine({ ...C0, entry }, NOW, 'hi')])); return f; };
+  assert.deepEqual(await source.sessionHead(mk('a.jsonl', 'cli')), { cwd: C0.cwd, entry: 'cli' });
+  assert.equal((await source.sessionHead(mk('b.jsonl', 'sdk-cli'))).entry, 'headless');
+  assert.equal((await source.sessionHead(mk('c.jsonl', 'ide-thing'))).entry, '');
+});
+test('source: listSessions keeps the window and counts every file', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const P = source.locate({ claudeDir: h.claudeDir });
+  const { sessions, total } = await source.listSessions(P, NOW - 4 * HOUR);
+  assert.equal(total, 11);
+  const ids = sessions.map((s) => s.session);
+  assert.ok(ids.includes(h.ids.A6) && !ids.includes(h.ids.B5) && !ids.includes(h.ids.B3));
+});
+test('source: helperMeta never returns the description', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const P = source.locate({ claudeDir: h.claudeDir });
+  const sub = path.join(P.projectsDir, h.folders[0], h.ids.A1, 'subagents');
+  const [hf] = await source.listHelpers(sub);
+  const meta = await source.helperMeta(hf.file);
+  assert.deepEqual(Object.keys(meta).sort(), ['finished', 'toolUseId', 'who']);
+  assert.equal(meta.who, 'reviewer');
+  assert.ok(!JSON.stringify(meta).includes('CANARY'));
+});
+test('source: folderOf matches the folder naming', () => {
+  assert.equal(source.folderOf(['C:', 'a b', 'c.d', ''].join('\\')), 'C--a-b-c-d');
+  assert.equal(source.folderOf(['', 'srv', 'x', 'y'].join('/')), '-srv-x-y');
+});
+
+// ---------------------------------------------------------------- usage
+test('usage: dedupe keeps the largest counters and the earliest time', () => {
+  const m = dedupe([['m1', 20, 'opus', 1, 5, 0, 0, false, '', 0], ['m1', 10, 'opus', 3, 2, 7, 1, false, 'high', 2]], new Map(), true);
+  assert.deepEqual(m.get('m1'), { t: 10, model: 'opus', i: 3, o: 5, cw: 7, cr: 1, cw1h: 2, side: false, own: true, effort: 'high' });
+  const s = dedupe([['m2', 1, 'opus', 1, 1, 0, 0, true, '', 0]], new Map(), true);
+  assert.equal(s.get('m2').own, false);
+});
+test('usage: usdOf prices the 5-minute and 1-hour parts, 0 for an unknown family', () => {
+  const p = { cache_write_x: 1.25, cache_write_1h_x: 2, models: { opus: { in: 4, out: 20, cache_read: 0.2 } } };
+  const r = { model: 'claude-opus-4', i: 1e6, o: 1e6, cw: 1e6, cr: 1e6, cw1h: 4e5 };
+  assert.equal(Math.round(usdOf(r, p) * 1000) / 1000, Math.round((4 + 20 + 0.6 * 4 * 1.25 + 0.4 * 4 * 2 + 0.2) * 1000) / 1000);
+  assert.equal(usdOf({ ...r, model: 'mystery' }, p), 0);
+  assert.equal(mainFamily([{ model: 'claude-sonnet', o: 5 }, { model: 'claude-opus', o: 9 }]), 'opus');
+});
+test('usage: burstsOf splits at the gap', () => {
+  assert.deepEqual(burstsOf([0, MIN, 2 * MIN, 20 * MIN, 21 * MIN]), [[0, 2 * MIN], [20 * MIN, 21 * MIN]]);
+});
+test('usage: the cache reads appended rows once', async () => {
+  const f = path.join(tmpDir(), 's.jsonl');
+  fs.writeFileSync(f, jl([assistantLine(C0, NOW, { id: 'a' })]));
+  const c = createUsageCache();
+  assert.equal((await c.rows(f, fs.statSync(f))).length, 1);
+  fs.appendFileSync(f, jl([assistantLine(C0, NOW, { id: 'b' })]));
+  assert.equal((await c.rows(f, fs.statSync(f))).length, 2);
+  assert.equal((await c.rows(f, fs.statSync(f))).length, 2);
+});
+
+// ---------------------------------------------------------------- sesstools
+const bgLines = (c, id, t, byResult = false) => [
+  assistantLine(c, t, { content: [toolUse('Bash', byResult ? { command: 'x' } : { command: 'x', run_in_background: true }, id)] }),
+  toolResult(c, t + 1000, id, byResult ? 'Async agent launched successfully' : 'ok'),
+];
+test('sesstools: a background launch by flag and by result text', async () => {
+  const d = tmpDir();
+  const f1 = path.join(d, 'f1.jsonl'), f2 = path.join(d, 'f2.jsonl');
+  fs.writeFileSync(f1, jl(bgLines(C0, 'toolu_bgflag01', NOW - MIN)));
+  fs.writeFileSync(f2, jl(bgLines(C0, 'toolu_bgtext01', NOW - MIN, true)));
+  assert.equal((await sessionTools(f1, null, NOW)).bg, 1);
+  assert.equal((await sessionTools(f2, null, NOW)).bg, 1);
+});
+test('sesstools: closed by a queued notification and by a text user turn', async () => {
+  const d = tmpDir();
+  const f1 = path.join(d, 'q.jsonl'), f2 = path.join(d, 'u.jsonl');
+  fs.writeFileSync(f1, jl([...bgLines(C0, 'toolu_close001', NOW - MIN), notification(C0, NOW, 'toolu_close001')]));
+  const n = notification(C0, NOW, 'toolu_close002');
+  fs.writeFileSync(f2, jl([...bgLines(C0, 'toolu_close002', NOW - MIN), userLine(C0, NOW, n.content)]));
+  assert.equal((await sessionTools(f1, null, NOW)).bg, 0);
+  assert.equal((await sessionTools(f2, null, NOW)).bg, 0);
+});
+test('sesstools: not closed by an assistant line or a tool result that quotes one', async () => {
+  const d = tmpDir();
+  const f = path.join(d, 'n.jsonl');
+  const n = notification(C0, NOW, 'toolu_keep0001').content;
+  fs.writeFileSync(f, jl([...bgLines(C0, 'toolu_keep0001', NOW - MIN), assistantLine(C0, NOW, { content: [{ type: 'text', text: n }] }), toolResult(C0, NOW, 'toolu_other01', n)]));
+  assert.equal((await sessionTools(f, null, NOW)).bg, 1);
+});
+test('sesstools: closed from another session of the folder', async () => {
+  const d = tmpDir();
+  const f1 = path.join(d, 'one.jsonl'), f2 = path.join(d, 'two.jsonl');
+  fs.writeFileSync(f1, jl(bgLines(C0, 'toolu_across01', NOW - MIN)));
+  fs.writeFileSync(f2, jl([notification(C0, NOW, 'toolu_across01')]));
+  touch(f1, NOW); touch(f2, NOW);
+  const closed = await folderClosed(d, NOW);
+  assert.ok(closed.has('toolu_across01'));
+  assert.equal((await sessionTools(f1, null, NOW, { closed })).bg, 0);
+});
+test('sesstools: the 3-hour cap', async () => {
+  const f = path.join(tmpDir(), 'old.jsonl');
+  fs.writeFileSync(f, jl(bgLines(C0, 'toolu_oldjob01', NOW - BG_MAX_MS - MIN)));
+  assert.equal((await sessionTools(f, null, NOW)).bg, 0);
+});
+test('sesstools: a helper own file with side: true', async () => {
+  const f = path.join(tmpDir(), 'agent-x.jsonl');
+  const c = { ...C0, side: true };
+  fs.writeFileSync(f, jl([assistantLine(c, NOW, { content: [toolUse('Grep', { pattern: 'a' }, 'toolu_side0001')] })]));
+  assert.equal((await sessionTools(f, null, NOW, { side: true })).tool.name, 'Grep');
+  const g = path.join(tmpDir(), 'main.jsonl');
+  fs.writeFileSync(g, jl([assistantLine(c, NOW, { content: [toolUse('Grep', { pattern: 'a' }, 'toolu_side0002')] })]));
+  assert.equal((await sessionTools(g, null, NOW)).tool, null);
+});
+
+// ---------------------------------------------------------------- states
+test('states: the sessionState table', () => {
+  const f = (state, at, sticky = false) => ({ state, at, sticky });
+  assert.equal(sessionState({ idleSec: 9 * 60 }), 'run');
+  assert.equal(sessionState({ idleSec: 11 * 60 }), 'idle');
+  assert.equal(sessionState({ idleSec: 11 * 60, lastAt: 5, seenAt: 6 }), 'done');
+  assert.equal(sessionState({ idleSec: 60 * 60, bg: 1 }), 'run');
+  assert.equal(sessionState({ file: f('running', 0), idleSec: 29 * 60 }), 'run');
+  assert.equal(sessionState({ file: f('running', 0), idleSec: 31 * 60 }), 'idle');
+  assert.equal(sessionState({ file: f('awaiting', 1000), idleSec: 60, ownAt: 1000 }), 'await');
+  assert.equal(sessionState({ file: f('awaiting', 1000), idleSec: 60, ownAt: 1000 + 60000 }), 'run');
+  assert.equal(sessionState({ file: f('awaiting', 1000, true), idleSec: 60, ownAt: 1000 + 60000 }), 'await');
+  assert.equal(sessionState({ file: f('waiting', 0, true), idleSec: 9999 }), 'wait');
+  assert.equal(sessionState({ file: f('idle', 0), idleSec: 9999, bg: 2 }), 'run');
+});
+test('states: sessionShown at the 2-hour and 12-hour edges', () => {
+  assert.equal(sessionShown({ idleSec: 2 * 3600 - 1, now: NOW }), true);
+  assert.equal(sessionShown({ idleSec: 2 * 3600, now: NOW }), false);
+  assert.equal(sessionShown({ file: { at: NOW - 12 * HOUR + 1000 }, idleSec: 99999, now: NOW }), true);
+  assert.equal(sessionShown({ file: { at: NOW - 12 * HOUR }, idleSec: 0, now: NOW }), false);
+});
+test('states: weekStart on a Sunday and a Monday', () => {
+  assert.equal(weekStart(new Date(2026, 2, 15, 22, 0).getTime()), new Date(2026, 2, 9).getTime());
+  assert.equal(weekStart(new Date(2026, 2, 16, 0, 30).getTime()), new Date(2026, 2, 16).getTime());
+});
+test('states: each error of markSeen and markPark', async () => {
+  const d = tmpDir();
+  const f = path.join(d, 'seen.jsonl'), p = path.join(d, 'park.jsonl');
+  const id = nodeId('x-session-1');
+  const err = async (fn, body) => (await fn(f, body)).body.error;
+  assert.equal(await err(markSeen, null), 'expected {id}');
+  assert.equal(await err(markSeen, { id, x: 1 }), 'unknown key x');
+  assert.equal(await err(markSeen, { id: '123' }), 'which one? (s-<id>)');
+  assert.equal(await err(markSeen, { id, name: 5 }), 'name must be text');
+  assert.equal((await markSeen(f, { id, name: 'a\u0000b' }, NOW)).status, 200);
+  assert.equal(await err(markPark, [1]), 'expected {id}');
+  assert.equal(await err(markPark, { id, unpark: false }), 'unpark is true or absent');
+  assert.equal(await err(markPark, { id, until: '3/1' }), 'the date is YYYY-MM-DD');
+  assert.equal(await err(markPark, { id, name: [] }), 'name must be text');
+  assert.equal((await markPark(p, { id, until: '2026-03-14' }, NOW)).status, 200);
+});
+test('states: parseSeen, the newest line wins', () => {
+  const id = nodeId('s1-session');
+  const m = parseSeen(`${JSON.stringify({ at: '2026-03-11T10:00:00Z', id, name: 'old' })}\nbad\n${JSON.stringify({ at: '2026-03-11T11:00:00Z', id, name: 'new' })}\n`);
+  assert.equal(m.get(id).name, 'new');
+});
+test('states: applyPark takes off, brings back due ones as idle, and unparks', () => {
+  const a = nodeId('a-session'), b = nodeId('b-session'), c = nodeId('c-session');
+  const nodes = [{ id: a, st: 'run' }, { id: b, st: 'run' }, { id: c, st: 'idle' }];
+  const park = parsePark([{ at: '2026-03-11T08:00:00Z', id: a, name: 'later', until: '2026-03-20' }, { at: '2026-03-11T08:00:00Z', id: b, until: '2026-03-10' },
+    { at: '2026-03-11T08:00:00Z', id: c, until: '' }, { at: '2026-03-11T09:00:00Z', id: c, unpark: true }].map((x) => JSON.stringify(x)).join('\n'));
+  const r = applyPark(nodes, park, NOW);
+  assert.deepEqual(r.nodes.map((n) => [n.id, n.st, !!n.back]), [[b, 'idle', true], [c, 'idle', false]]);
+  assert.deepEqual(r.parked.map((x) => [x.id, x.name]), [[a, 'later']]);
+});
+test('states: parseLive rejects a bad state and cleans the label', () => {
+  assert.equal(parseLive(JSON.stringify({ session: 'abcdefgh-1', state: 'sleeping', at: new Date(NOW).toISOString() })), null);
+  const v = parseLive(JSON.stringify({ session: 'abcdefgh-1', state: 'idle', at: new Date(NOW).toISOString(), task: `a\u0007b ${'x'.repeat(80)}` }));
+  assert.equal(v.task.length, 48);
+  assert.ok(!/[\u0000-\u001f]/.test(v.task));
+});
+test('states: pruneLive deletes files older than 14 days', async () => {
+  const d = tmpDir();
+  writeLive(d, 'abcdefgh-old', { state: 'idle' }, Date.now() - 20 * DAY);
+  writeLive(d, 'abcdefgh-new', { state: 'idle' }, Date.now());
+  assert.equal(await pruneLive(path.join(d, 'live')), 1);
+  assert.deepEqual([...(await readLiveDir(path.join(d, 'live'))).keys()], ['abcdefgh-new']);
+});
+
+// ---------------------------------------------------------------- hooks
+const runHook = async (dataDir, argv, stdin = '') => {
+  const out = [], err = [];
+  const code = await statusMain([...argv, '--data', dataDir], {}, { stdin, out: (s) => out.push(s), err: (s) => err.push(s) });
+  return { code, out: out.join('\n'), err: err.join('\n') };
+};
+const liveOf = (d, s) => { try { return JSON.parse(fs.readFileSync(path.join(d, 'live', `${s}.json`), 'utf8')); } catch { return null; } };
+test('hooks: each hook mode writes its state', async () => {
+  const d = tmpDir(), s = 'abcdefgh-hook-1';
+  const input = (extra = {}) => JSON.stringify({ session_id: s, ...extra });
+  assert.equal((await runHook(d, ['--hook', 'running'], input())).code, 0);
+  assert.equal(liveOf(d, s).state, 'running');
+  await runHook(d, ['--hook', 'awaiting'], input({ notification_type: 'permission_prompt' }));
+  assert.equal(liveOf(d, s).state, 'awaiting');
+  await runHook(d, ['--hook', 'idle'], input());
+  assert.equal(liveOf(d, s).state, 'idle');
+});
+test('hooks: idle keeps a sticky awaiting', async () => {
+  const d = tmpDir(), s = 'abcdefgh-hook-2';
+  await runHook(d, ['--state', 'awaiting', '--session', s]);
+  assert.equal(liveOf(d, s).sticky, true);
+  await runHook(d, ['--hook', 'idle'], JSON.stringify({ session_id: s }));
+  assert.equal(liveOf(d, s).state, 'awaiting');
+  await runHook(d, ['--hook', 'running'], JSON.stringify({ session_id: s }));
+  assert.equal(liveOf(d, s).state, 'running');
+  assert.equal(liveOf(d, s).sticky, undefined);
+});
+test('hooks: awaiting ignores idle_prompt and a missing type', async () => {
+  const d = tmpDir(), s = 'abcdefgh-hook-3';
+  await runHook(d, ['--hook', 'running'], JSON.stringify({ session_id: s }));
+  await runHook(d, ['--hook', 'awaiting'], JSON.stringify({ session_id: s, notification_type: 'idle_prompt' }));
+  await runHook(d, ['--hook', 'awaiting'], JSON.stringify({ session_id: s }));
+  assert.equal(liveOf(d, s).state, 'running');
+});
+test('hooks: a prompt in stdin never reaches the file', async () => {
+  const d = tmpDir(), s = 'abcdefgh-hook-4';
+  await runHook(d, ['--hook', 'running'], JSON.stringify({ session_id: s, prompt: 'CANARY_HOOKPROMPT_abc123', cwd: '/x/CANARY_HOOKCWD' }));
+  const text = fs.readFileSync(path.join(d, 'live', `${s}.json`), 'utf8');
+  assert.ok(!text.includes('CANARY'));
+});
+test('hooks: bad stdin exits 0 and writes nothing', async () => {
+  const d = tmpDir();
+  assert.equal((await runHook(d, ['--hook', 'running'], 'not json')).code, 0);
+  assert.equal((await runHook(d, ['--hook', 'running'], JSON.stringify({ session_id: '../../x' }))).code, 0);
+  assert.equal(fs.existsSync(path.join(d, 'live')), false);
+});
+test('hooks: --state bogus exits 2', async () => {
+  const r = await runHook(tmpDir(), ['--state', 'bogus', '--session', 'abcdefgh-hook-5']);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /the state is awaiting, waiting, running or idle/);
+});
+test('hooks: --task keeps a cleaned label of 48 characters at most', async () => {
+  const d = tmpDir(), s = 'abcdefgh-hook-6';
+  assert.equal((await runHook(d, ['--task', `fix\u0007 the\tlogin ${'y'.repeat(60)}`, '--session', s])).out, 'status saved');
+  const v = liveOf(d, s);
+  assert.equal(v.task.length, 48);
+  assert.ok(v.task.startsWith('fix the login'));
+  assert.ok(!/[\u0000-\u001f]/.test(v.task));
+  await runHook(d, ['--hook', 'idle'], JSON.stringify({ session_id: s }));
+  assert.equal(liveOf(d, s).task, v.task);
+  assert.equal((await runHook(d, ['--task', '\u0001 ', '--session', s])).code, 2);
+});
+test('hooks: --print-install holds this file path and three events', async () => {
+  const r = await runHook(tmpDir(), ['--print-install']);
+  const o = JSON.parse(r.out);
+  assert.deepEqual(Object.keys(o.hooks).sort(), ['Notification', 'Stop', 'UserPromptSubmit']);
+  const p = path.join(REPO, 'hooks', 'status.mjs').replace(/\\/g, '/');
+  assert.ok(o.hooks.Stop[0].hooks[0].command.includes(p));
+});
+
+// ---------------------------------------------------------------- brain
+async function brainOf(opts = {}, now = NOW) {
+  const h = opts.h || makeHome(tmpDir(), NOW, opts);
+  const P = source.locate({ claudeDir: h.claudeDir });
+  const team = await readTeam(P.agentsDir);
+  const cache = opts.cache || createUsageCache();
+  const c = await collect({ P, cache, prices: PRICES, team, now });
+  const B = await buildBrain(c.sess, { dataDir: h.dataDir, total: c.total, team, now });
+  const node = (k) => B.nodes.find((n) => n.id === nodeId(h.ids[k])) || null;
+  return { h, P, c, B, node, cache, team };
+}
+test('brain: each row of the fixture table', async () => {
+  const { B, node } = await brainOf();
+  const a1 = node('A1');
+  assert.equal(a1.st, 'run'); assert.equal(a1.entry, 'cli');
+  assert.deepEqual(a1.tool, { k: 'tool', name: 'Bash' }); assert.equal(a1.skill, 'demo-skill');
+  assert.equal(a1.plus, 1); assert.equal(a1.bg, undefined);
+  assert.deepEqual(a1.helpers.map((x) => [x.role, x.st, x.effort]), [['reviewer', 'run', 'med']]);
+  assert.equal(a1.model, 'opus'); assert.equal(a1.effort, 'med');
+  const a2 = node('A2');
+  assert.equal(a2.st, 'idle'); assert.equal(a2.entry, 'headless'); assert.equal(a2.noHooks, true);
+  const a3 = node('A3');
+  assert.equal(a3.st, 'run'); assert.equal(a3.waitJob, true); assert.equal(a3.bg, 1);
+  assert.equal(node('A4').st, 'idle');
+  assert.equal(node('A5'), null); assert.equal(node('A6'), null);
+  assert.equal(node('B1').st, 'await');
+  assert.equal(node('B2').st, 'run');
+  assert.equal(node('B3').st, 'idle');
+  assert.equal(node('B4').st, 'wait');
+  assert.equal(node('B5'), null);
+  assert.equal(B.nodes.length, 8);
+  assert.deepEqual(B.projects.map((p) => [p.label, p.st, p.n]).sort(), [['alpha', 'run', 4], ['beta', 'await', 4]]);
+  assert.deepEqual(B.counts, { run: 3, await: 1, wait: 1, idle: 3, done: 0 });
+  assert.equal(B.you.st, 'await'); assert.equal(B.you.sessions, 8); assert.equal(B.you.running, 3);
+  assert.equal(B.empty, false); assert.equal(B.hooks, true);
+  assert.equal(new Set(B.nodes.map((n) => n.id)).size, B.nodes.length);
+});
+test('brain: the session label shows, cleaned and cut', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  writeLive(h.dataDir, h.ids.B3, { task: `ship the \u0007 release ${'z'.repeat(60)}` }, NOW);
+  const { node } = await brainOf({ h });
+  assert.equal(node('B4').task, 'tidy the test data');
+  const t = node('B3').task;
+  assert.equal(t.length, 48); assert.ok(t.startsWith('ship the release'));
+  assert.equal(node('A1').task, undefined);
+});
+test('brain: twin labels', async () => {
+  const { B } = await brainOf({ twin: true });
+  assert.deepEqual(B.projects.map((p) => p.label).sort(), ['alpha', 'alpha (2)', 'beta']);
+});
+test('brain: a seen line moves A2 to done and a later write brings it back', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const id = nodeId(h.ids.A2);
+  await markSeen(path.join(h.dataDir, 'seen.jsonl'), { id, name: 'alpha · 2:20 PM' }, NOW);
+  const cache = createUsageCache();
+  const r1 = await brainOf({ h, cache });
+  assert.equal(r1.node('A2'), null);
+  assert.deepEqual(r1.B.done.map((x) => [x.id, x.name]), [[id, 'alpha · 2:20 PM']]);
+  assert.equal(r1.B.counts.done, 1);
+  const f = path.join(r1.P.projectsDir, h.folders[0], `${h.ids.A2}.jsonl`);
+  fs.appendFileSync(f, jl([assistantLine({ session: h.ids.A2, cwd: 'x', entry: 'sdk-cli' }, NOW + MIN, { model: 'claude-sonnet-4-5' })]));
+  touch(f, NOW + MIN);
+  const r2 = await brainOf({ h, cache }, NOW + 2 * MIN);
+  assert.ok(r2.node('A2'));
+});
+test('brain: at most 8 nodes per project, the rest counted', async () => {
+  const { B } = await brainOf({ many: 10 });
+  const g = B.projects.find((p) => p.label === 'gamma');
+  assert.equal(g.n, 8); assert.equal(g.more, 2);
+  assert.equal(B.nodes.filter((n) => n.parent === g.key).length, 8);
+});
+test('brain: an empty home', async () => {
+  const h = makeHome(tmpDir(), NOW, { empty: true });
+  const { B } = await brainOf({ h });
+  assert.equal(B.empty, true); assert.equal(B.hooks, false); assert.deepEqual(B.nodes, []);
+});
+
+// ---------------------------------------------------------------- details
+test('details: days, totals, one response once, the lead and helper split', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const P = source.locate({ claudeDir: h.claudeDir });
+  const d = await loadDetails({ P, cache: createUsageCache(), prices: PRICES, now: NOW });
+  assert.equal(d.days.length, 14);
+  assert.equal(d.days.at(-1).day, dayKey(NOW));
+  assert.equal(d.today, dayKey(NOW));
+  assert.equal(d.responses, h.responses);
+  const todayTok = Object.values(d.days.at(-1).models).reduce((a, v) => a + v.tok, 0);
+  assert.ok(todayTok > 0);
+  assert.equal(spendOf(d).tokens, todayTok);
+  assert.ok(!d.sessions.some((s) => s.id === nodeId(h.ids.B5)));
+  const alpha = d.projects.find((p) => p.label === 'alpha');
+  assert.equal(alpha.helper.n, 2);
+  assert.ok(alpha.lead.n > 0);
+});
+test('details: spendOf usual is the median, null under 3 days', () => {
+  const day = (k, tok) => ({ day: k, models: tok ? { opus: { n: 1, tok, usd: tok / 1000 } } : {} });
+  const d = { today: '2026-03-11', days: [day('2026-03-07', 100), day('2026-03-08', 0), day('2026-03-09', 300), day('2026-03-10', 200), day('2026-03-11', 50)] };
+  assert.deepEqual(spendOf(d).usual, { tokens: 200, usd: 0.2 });
+  assert.equal(spendOf({ ...d, days: d.days.slice(2) }).usual, null);
+});
+
+// ---------------------------------------------------------------- tools
+test('tools: the inventory, usage counts and merges', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const P = source.locate({ claudeDir: h.claudeDir });
+  const catalogFile = path.join(tmpDir(), 'tools-catalog.json');
+  fs.writeFileSync(catalogFile, JSON.stringify({ items: [{ name: 'resize', line: 'Resizes', match: 'resize.mjs' }, { name: 'deploy', line: 'Ships' }] }));
+  const usage = await countUsage(P.projectsDir, ['resize.mjs'], NOW);
+  const T = await listTools({ P, catalogFile, usageOf: () => usage, now: NOW });
+  assert.equal(T.usage, 'ready');
+  const where = Object.fromEntries(T.skills.map((s) => [s.name, s.where]));
+  assert.equal(where['demo-skill'], 'user'); assert.equal(where['proj-skill'], 'project alpha'); assert.equal(where['plug-skill'], 'plugin plug-a');
+  assert.equal(where['not-enabled'], undefined); assert.equal(where.gone, undefined);
+  assert.deepEqual(T.mcp.map((m) => m.name).sort(), ['dot-mcp', 'fixture-mcp', 'proj-mcp']);
+  assert.deepEqual(T.hooks.map((x) => [x.event, x.script]), [['Stop', 'stop.mjs']]);
+  assert.deepEqual(T.commands.map((c) => c.name), ['/ship']);
+  assert.deepEqual(T.plugins, ['plug-a@mk']);
+  assert.equal(T.statusLine, 'statusline.mjs');
+  const demo = T.skills.find((s) => s.name === 'demo-skill').use;
+  assert.equal(demo.d30, 2); assert.equal(demo.d7, 1);
+  assert.equal(T.skills.find((s) => s.name === 'unused-skill').use.d30, 0);
+  assert.equal(T.helpers.find((x) => x.name === 'reviewer').use.d30, 1);
+  assert.equal(T.mcp.find((m) => m.name === 'fixture-mcp').use.d30, 1);
+  assert.equal(T.own.find((i) => i.name === 'deploy').use, null);
+  assert.ok(T.merges.some((m) => m.names.includes('demo-skill') && m.names.includes('unused-skill')));
+  assert.ok(!JSON.stringify(T).includes('CANARY'));
+});
+test('tools: the catalog parse drops bad items and short matches', () => {
+  const c = parseCatalog(JSON.stringify({ items: [{ name: 'ok', line: 'fine', match: 'abc' }, { line: 'no name' }, 5, { name: 'm', match: 'Long.MJS' }] }));
+  assert.deepEqual(c, [{ name: 'ok', line: 'fine' }, { name: 'm', line: '', match: 'long.mjs' }]);
+  assert.equal(parseCatalog('nope'), null);
+  assert.equal(mergeHints([{ name: 'a', where: 'user', description: 'one two three four' }, { name: 'b', where: 'user', description: 'other words entirely here' }]).length, 0);
+});
+
+// ---------------------------------------------------------------- team
+test('team: readTeam and modelsFor', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const t = await readTeam(path.join(h.claudeDir, 'agents'));
+  assert.deepEqual(t.map((x) => x.name), ['bad', 'planner', 'reviewer']);
+  assert.deepEqual(t.find((x) => x.name === 'bad'), { name: 'bad', description: '', model: '', modelRaw: '', effort: '' });
+  assert.equal(t.find((x) => x.name === 'planner').model, 'opus');
+  assert.ok(modelsFor(t).includes('claude-opus-9-9'));
+});
+test('team: setFrontmatter changes two lines only and keeps CRLF', () => {
+  const text = '---\r\nname: r\r\nmodel: sonnet\r\neffort: low\r\n---\r\nBody\r\n';
+  assert.equal(setFrontmatter(text, { model: 'opus', effort: 'high' }), '---\r\nname: r\r\nmodel: opus\r\neffort: high\r\n---\r\nBody\r\n');
+  assert.equal(setFrontmatter('---\nname: p\nmodel: x\n---\nB\n', { effort: 'max' }), '---\nname: p\nmodel: x\neffort: max\n---\nB\n');
+  assert.equal(setFrontmatter('no frontmatter', { model: 'opus' }), null);
+});
+test('team: each guard, the write and the log line', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const agentsDir = path.join(h.claudeDir, 'agents'), logFile = path.join(h.dataDir, 'team-changes.jsonl');
+  const set = (body, o = {}) => setTeam(body, { agentsDir, logFile, now: NOW, ...o });
+  const st = async (body) => { const r = await set(body); return [r.status, r.body.error]; };
+  assert.deepEqual(await st('x'), [400, 'expected {helper, model, effort}']);
+  assert.deepEqual(await st({ helper: 'reviewer', x: 1 }), [400, 'unknown key x']);
+  assert.deepEqual(await st({ helper: '../x', model: 'opus' }), [400, 'which helper? (its file name, no path)']);
+  assert.deepEqual(await st({ helper: 'reviewer' }), [400, 'nothing to change']);
+  assert.match((await st({ helper: 'reviewer', model: 'gpt' }))[1], /^the model is one of: fable, opus/);
+  assert.match((await st({ helper: 'reviewer', effort: 'huge' }))[1], /^the effort is one of: low/);
+  assert.deepEqual(await st({ helper: 'ghost', model: 'opus' }), [404, 'no helper named ghost']);
+  assert.deepEqual(await st({ helper: 'bad', model: 'opus' }), [409, 'bad.md has no frontmatter']);
+  const file = path.join(agentsDir, 'reviewer.md');
+  const before = fs.readFileSync(file, 'utf8');
+  const dry = await set({ helper: 'reviewer', model: 'opus' }, { dryRun: true });
+  assert.equal(dry.body.dryRun, true);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.equal(fs.existsSync(logFile), false);
+  const r = await set({ helper: 'reviewer', model: 'opus' });
+  assert.equal(r.status, 200);
+  const after = fs.readFileSync(file, 'utf8');
+  const diff = before.split('\r\n').map((l, i) => (l === after.split('\r\n')[i] ? null : [l, after.split('\r\n')[i]])).filter(Boolean);
+  assert.deepEqual(diff, [['model: sonnet', 'model: opus']]);
+  const line = JSON.parse(fs.readFileSync(logFile, 'utf8').trim());
+  assert.deepEqual([line.helper, line.from.model, line.to.model], ['reviewer', 'sonnet', 'opus']);
+});

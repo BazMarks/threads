@@ -1,0 +1,6 @@
+{
+  "items": [
+    { "name": "resize-images", "line": "Batch-resizes a folder of images", "match": "resize-images.mjs" },
+    { "name": "deploy", "line": "Builds and uploads the site" }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "note": "API list prices, USD per 1M tokens. An estimate: a subscription plan is not billed this way.",
+  "as_of": "2026-11-15",
+  "cache_write_x": 1.25,
+  "cache_write_1h_x": 2,
+  "models": {
+    "fable":  { "in": 8,    "out": 40,   "cache_read": 0.20 },
+    "opus":   { "in": 4,    "out": 20,   "cache_read": 0.20 },
+    "sonnet": { "in": 2,    "out": 10,   "cache_read": 0.10 },
+    "haiku":  { "in": 0.10, "out": 0.50, "cache_read": 0.01 }
+  }
+}

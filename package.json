@@ -1,0 +1,14 @@
+{
+  "name": "threads",
+  "version": "0.1.0",
+  "description": "A local dashboard of your Claude Code sessions: states, usage, tools and helpers, read from your own files.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/unit.test.mjs test/server.test.mjs test/leak.test.mjs test/repo.test.mjs",
+    "shot": "node test/shot.mjs"
+  }
+}

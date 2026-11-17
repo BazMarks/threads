@@ -1,0 +1,6 @@
+data/
+config.json
+tools-catalog.json
+node_modules/
+*.log
+test/out/
