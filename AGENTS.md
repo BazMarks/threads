@@ -15,7 +15,8 @@ on their machine. It listens on 127.0.0.1 only and sends nothing anywhere.
 
 ## Where things are
 
-- `lib/`: the modules behind each tab (brain, details, tools, team), the state rules, caches and helpers.
+- `lib/`: the modules behind each tab (brain, details, tools, team; `timeline.mjs` is the Brain's Timeline layout), the
+  state rules, caches and helpers.
 - `lib/sources/`: everything that knows Claude Code's folders and line format; `index.mjs` picks the source.
 - `hooks/`: `status.mjs`, run by Claude Code's hooks or by hand, and its README.
 - `public/`: the page (`index.html`, `app.js`, `styles.css`, `favicon.svg`).
@@ -61,6 +62,7 @@ const c = await collect({ P, cache: createUsageCache(), prices: loadPrices(), te
 const B = await buildBrain(c.sess, { dataDir: './data', total: c.total, team });
 // B.projects: each project and its state. B.nodes: each session with its state (run, await, wait, idle, done),
 // model, effort, tokens, dollars, minutes and its helpers (role, state, model, effort, tokens).
+// B.today: today's busy stretches per project and session (and per helper), as [from, to] times.
 ```
 
 - A new tab: add a route to `GET_ROUTES` in `server.mjs`; in `public/app.js` add its `VIEWS`, `data`, `ENDPOINT` and

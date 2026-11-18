@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const STATES = ['awaiting', 'waiting', 'running', 'idle'];
+const STATES = ['awaiting', 'waiting', 'running', 'idle'];
 const SID = /^[A-Za-z0-9-]{8,80}$/;
 const ASKS = ['permission_prompt', 'elicitation_dialog'];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -22,7 +22,7 @@ const folderOf = (p) => String(p || '').replace(/[\\/]+$/, '').replace(/[^A-Za-z
 const clean = (s, n) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
 
 /** The newest transcript of a working folder, as a session id, or ''. */
-export function newestSession(claudeDir, cwd) {
+function newestSession(claudeDir, cwd) {
   const dir = path.join(claudeDir, 'projects', folderOf(cwd));
   let best = '', at = -1, names = [];
   try { names = fs.readdirSync(dir); } catch { return ''; }
@@ -61,7 +61,7 @@ export function writeLive(dataDir, session, change = {}, now = Date.now()) {
 }
 
 /** The hook's stdin JSON -> {session, type} or null. Nothing else is kept. */
-export function hookInput(text) {
+function hookInput(text) {
   let o = null;
   try { o = JSON.parse(String(text || '')); } catch { return null; }
   if (!o || typeof o !== 'object' || typeof o.session_id !== 'string' || !SID.test(o.session_id)) return null;
@@ -69,7 +69,7 @@ export function hookInput(text) {
 }
 
 /** The settings block that runs this file from the three hooks. */
-export function installSnippet(scriptPath = fileURLToPath(import.meta.url)) {
+function installSnippet(scriptPath = fileURLToPath(import.meta.url)) {
   const p = path.resolve(scriptPath).replace(/\\/g, '/');
   const cmd = (state) => [{ hooks: [{ type: 'command', command: `node "${p}" --hook ${state}`, timeout: 5 }] }];
   return { hooks: { UserPromptSubmit: cmd('running'), Stop: cmd('idle'), Notification: cmd('awaiting') } };

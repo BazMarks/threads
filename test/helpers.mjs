@@ -75,7 +75,6 @@ export async function startServer({ claudeDir, dataDir, args = [], catalogText =
     get: (p, headers = {}) => request(port, 'GET', p, { headers: { 'X-Threads-Token': token, ...headers } }),
     post: (p, body, headers = {}) => request(port, 'POST', p, { headers: { 'X-Threads-Token': token, Origin: origin, 'Content-Type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) }),
     raw: (method, p, opts) => request(port, method, p, opts),
-    text: async (p) => (await request(port, 'GET', p, { headers: { 'X-Threads-Token': token } })).text,
     output: () => out + err,
     stop: () => new Promise((resolve) => { if (child.exitCode != null) return resolve(); child.once('exit', resolve); child.kill(); }),
   };

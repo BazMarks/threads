@@ -15,6 +15,7 @@ import {
 } from '../lib/states.mjs';
 import { main as statusMain, writeLive } from '../hooks/status.mjs';
 import { collect, buildBrain } from '../lib/brain.mjs';
+import { todayTimeline, clipSpans } from '../lib/timeline.mjs';
 import { loadDetails, spendOf } from '../lib/details.mjs';
 import { countUsage, mergeHints } from '../lib/toolusage.mjs';
 import { listTools, parseCatalog } from '../lib/tools.mjs';
@@ -446,6 +447,38 @@ test('brain: an empty home', async () => {
   const h = makeHome(tmpDir(), NOW, { empty: true });
   const { B } = await brainOf({ h });
   assert.equal(B.empty, true); assert.equal(B.hooks, false); assert.deepEqual(B.nodes, []);
+  assert.deepEqual(B.today.rows, []);
+});
+
+// ---------------------------------------------------------------- timeline
+test('timeline: spans are clipped to today', async () => {
+  const h = makeHome(tmpDir(), NOW);
+  const sod = startOfDay(NOW);
+  const c = { session: sid(90), cwd: path.join(h.workDir, 'alpha'), entry: 'cli' };
+  const f = path.join(h.claudeDir, 'projects', h.folders[0], `${c.session}.jsonl`);
+  fs.writeFileSync(f, jl([assistantLine(c, sod - 2 * MIN), assistantLine(c, sod + MIN)]));
+  touch(f, NOW - 30 * MIN);
+  const { B } = await brainOf({ h });
+  assert.equal(B.today.day, dayKey(NOW)); assert.equal(B.today.from, sod); assert.equal(B.today.to, NOW);
+  const lanes = B.today.rows.flatMap((r) => r.lanes);
+  const lane = lanes.find((x) => x.id === nodeId(c.session));
+  assert.ok(B.nodes.some((n) => n.id === lane.id), 'a lane is a node on the tree');
+  assert.deepEqual(lane.spans, [[sod, sod + MIN]]);
+  for (const x of lanes) for (const [a, b] of [...x.spans, ...x.helpers.flatMap((y) => y.spans)]) assert.ok(a >= sod && b <= NOW && a <= b);
+  const a1 = lanes.find((x) => x.id === nodeId(h.ids.A1));
+  assert.deepEqual(a1.helpers.map((y) => [y.role, y.st, y.model]), [['reviewer', 'run', 'sonnet']]);
+  const order = B.projects.map((p) => p.key).filter((k) => B.today.rows.some((r) => r.key === k));
+  assert.deepEqual(B.today.rows.map((r) => r.key), order, 'rows keep the tree order');
+});
+test('timeline: a session with no span today is absent', () => {
+  const sod = startOfDay(NOW);
+  const nodes = [{ id: 's-old', parent: 'p-1' }, { id: 's-new', parent: 'p-2' }];
+  const projects = [{ key: 'p-1' }, { key: 'p-2' }];
+  const lanes = new Map([['s-old', { spans: [[sod - 2 * HOUR, sod - HOUR]], helpers: [] }],
+    ['s-new', { spans: [[sod + HOUR, sod + 2 * HOUR]], helpers: [{ role: 'r', st: 'done', model: 'opus', spans: [[sod - HOUR, sod - MIN]] }] }]]);
+  const T = todayTimeline({ nodes, projects, lanes, now: NOW });
+  assert.deepEqual(T.rows, [{ key: 'p-2', lanes: [{ id: 's-new', spans: [[sod + HOUR, sod + 2 * HOUR]], helpers: [] }] }]);
+  assert.deepEqual(clipSpans([[NOW - MIN, NOW + HOUR]], sod, NOW), [[NOW - MIN, NOW]]);
 });
 
 // ---------------------------------------------------------------- details

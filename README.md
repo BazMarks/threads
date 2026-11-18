@@ -56,7 +56,9 @@ Got it. With hooks its own state wins.
 
 ## The tabs
 
-- **Brain**: you, your projects and their sessions as a tree, with helpers, tool tags, Got it and Park.
+- **Brain**: you, your projects and their sessions, with helpers, tool tags, Got it and Park. A **Tree | Timeline** switch
+  shows them as a tree, or as today on one clock: a lane per session under its project, its helpers under it, a bar
+  for each busy stretch and a line at now. The picked session stays picked across the switch; the page remembers your choice.
 - **Details**: tokens (or list dollars) per day by model, per project, and per session with its largest context.
 - **Tools**: skills, helpers, MCP servers, hooks, plugins and commands, with how often each was used in 30 days.
 - **Team**: each helper file's model and effort, changed with one press.
@@ -78,7 +80,8 @@ Got it. With hooks its own state wins.
 
 ## Tests
 
-`npm test`. Pictures of the five tabs on made-up data: `npm run shot` (needs Chrome or Edge).
+`npm test`. Pictures of the four tabs on made-up data, the Brain as Tree and Timeline, wide and at phone width: `npm run shot`
+(needs Chrome or Edge; the phone pictures need Node 22 or newer).
 
 ## Licence
 

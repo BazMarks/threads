@@ -31,6 +31,8 @@
     get(area, k) { try { return area.getItem(k); } catch { return null; } },
     set(area, k, v) { try { area.setItem(k, v); } catch { /* storage blocked: this visit only */ } },
   };
+  // a phone or a narrow window: the tree stacks its projects and fits the width (styles.css has the same 700px)
+  const NARROW = window.matchMedia ? window.matchMedia('(max-width: 700px)') : { matches: false };
   const still = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const hhmm = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const md = (ms) => new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' });
@@ -42,8 +44,12 @@
 
   // ---------------------------------------------------------------- state
   const VIEWS = [['brain', 'Brain'], ['details', 'Details'], ['tools', 'Tools'], ['team', 'Team']];
-  const viewOfHash = () => { const v = location.hash.replace(/^#/, ''); return VIEWS.some(([k]) => k === v) ? v : 'brain'; };
-  const ui = { view: viewOfHash(), brSel: null, brDone: false, brParkOpen: false, brHelpOpen: true, brFocus: false, dragging: false, pending: false,
+  const LAYOUTS = [['tree', 'Tree'], ['timeline', 'Timeline']];
+  const hashParts = () => location.hash.replace(/^#/, '').split('/');
+  const viewOfHash = () => { const v = hashParts()[0]; return VIEWS.some(([k]) => k === v) ? v : 'brain'; };
+  // the Brain's layout: #brain/timeline or #brain/tree wins, else the one this viewer picked last
+  const layoutOf = () => { const [v, l] = hashParts(); if (v === 'brain' && LAYOUTS.some(([k]) => k === l)) return l; return store.get(localStorage, 'threads-layout') === 'timeline' ? 'timeline' : 'tree'; };
+  const ui = { view: viewOfHash(), brLayout: layoutOf(), brSel: null, brDone: false, brParkOpen: false, brHelpOpen: !NARROW.matches, brFocus: false, dragging: false, pending: false,
     toolSort: 'az', toolQ: '', toolOpen: new Set() };
   const data = { brain: null, details: null, tools: null, team: null };
   const errors = {};
@@ -141,13 +147,24 @@
     return h('header', { class: 'br-top' },
       h('h1', {}, h('b', { text: '//', 'aria-hidden': 'true' }), 'Threads'),
       h('nav', { class: 'br-tabs', 'aria-label': 'Tabs' }, VIEWS.map(([k, label]) => h('button', { class: ui.view === k ? 'on' : null, type: 'button', 'aria-current': ui.view === k ? 'page' : null, onclick: () => go(k) }, label))),
+      ui.view === 'brain' ? h('div', { class: 'br-seg br-lay', role: 'group', 'aria-label': 'Brain layout' }, LAYOUTS.map(([k, label]) => h('button', { class: ui.brLayout === k ? 'on' : null, type: 'button',
+        'aria-pressed': ui.brLayout === k ? 'true' : 'false', title: k === 'tree' ? 'You, your projects and their sessions as a tree' : 'Today on one clock: one lane per session', onclick: () => setLayout(k) }, label))) : null,
       h('div', { class: 'br-key', 'aria-label': 'Models' }, FAM_ORDER.filter((m) => fams.has(m)).map((m) => h('span', {}, brChip(m), FAM[m][1]))),
       sw);
   }
   function setMoney(m) { money = m; store.set(localStorage, 'threads-money', m); render(); }
+  /** Tree or Timeline: the same data, the picked session stays picked. */
+  function setLayout(l) {
+    if (ui.brLayout === l) return;
+    ui.brLayout = l; ui.brFocus = !!ui.brSel;
+    store.set(localStorage, 'threads-layout', l);
+    if (hashParts()[1]) { try { history.replaceState(null, '', `#brain/${l}`); } catch { /* the hash stays */ } }
+    render();
+  }
   function go(k) { if (location.hash !== `#${k}`) location.hash = k; else setView(k); }
   function setView(k) {
     ui.view = k;
+    if (k === 'brain') ui.brLayout = layoutOf();
     if (k !== 'brain') load(k);
     render();
   }
@@ -186,7 +203,7 @@
       h('div', { class: 'br-l1' }, brG(B.you.st), h('span', { class: 'br-nm', text: 'YOU' }), brTag(B.you.st)),
       h('div', { class: 'br-l2' }, h('span', { text: `${plural(B.you.sessions, 'session')} · ${B.you.running} running` })));
     const cols = B.projects.map((p) => {
-      edges.push(['you', p.key, WIRE[p.st]]);
+      edges.push(['you', p.key, WIRE[p.st], NARROW.matches ? 'side' : null]);
       const nodes = B.nodes.filter((n) => n.parent === p.key);
       const items = nodes.map((n) => {
         edges.push([p.key, n.id, WIRE[n.st], 'side']);
@@ -315,12 +332,15 @@
   }
   let drawerH = Number(store.get(sessionStorage, 'threads-drawer')) || null;
   function brDrawerSize() {
-    const cv = document.querySelector('.br-canvas'), d = document.querySelector('.br-drawer');
+    const cv = document.querySelector('.br-canvas, .tl-box'), d = document.querySelector('.br-drawer');
+    const tl = !!cv && cv.classList.contains('tl-box');
+    if (tl && !d) cv.style.setProperty('padding-bottom', '0px');
     if (!cv || !d) return;
     const H = cv.clientHeight;
     const hb = cv.querySelector('.br-helpers');
     const top = hb ? hb.offsetTop + hb.offsetHeight + 12 : 60;
     d.style.setProperty('height', `${Math.max(140, Math.min(H - top, drawerH || Math.round(H * 0.4)))}px`);
+    if (tl) cv.style.setProperty('padding-bottom', `${d.offsetHeight + 12}px`);
   }
   function brDrawerGrip() {
     const d = document.querySelector('.br-drawer'), g = d && d.querySelector('.br-grip');
@@ -389,9 +409,17 @@
     if (!w) return;
     const hb = cv.querySelector('.br-helpers'), rw = hb ? hb.offsetWidth + 20 : 0;
     const dr = document.querySelector('.br-drawer');
-    const W = cv.clientWidth - rw, H = cv.clientHeight - (dr ? dr.offsetHeight : 0), m = 24, bw = w.offsetWidth || 1, bh = w.offsetHeight || 1;
-    const k = Math.max(KMIN, Math.min(1, (W - 2 * m) / bw, (H - 2 * m) / bh));
-    view = { k, tx: Math.max(m, (W - bw * k) / 2), ty: m + Math.max(0, (H - 2 * m - bh * k) / 2) };
+    const bw = w.offsetWidth || 1, bh = w.offsetHeight || 1;
+    if (NARROW.matches) {
+      // narrow: fit the width only and start at the top, under the zoom buttons and the helpers box; scroll by dragging
+      const m = 8, top = hb ? hb.offsetTop + hb.offsetHeight + 12 : 52;
+      const k = Math.max(KMIN, Math.min(1, (cv.clientWidth - 2 * m) / bw));
+      view = { k, tx: Math.max(m, (cv.clientWidth - bw * k) / 2), ty: top };
+    } else {
+      const W = cv.clientWidth - rw, H = cv.clientHeight - (dr ? dr.offsetHeight : 0), m = 24;
+      const k = Math.max(KMIN, Math.min(1, (W - 2 * m) / bw, (H - 2 * m) / bh));
+      view = { k, tx: Math.max(m, (W - bw * k) / 2), ty: m + Math.max(0, (H - 2 * m - bh * k) / 2) };
+    }
     applyView(); saveView();
   }
   function zoom(f, px, py) {
@@ -412,7 +440,7 @@
     if (r.bottom > limit) pan(0, limit - r.bottom); else if (r.top < C.top + 16) pan(0, C.top + 16 - r.top);
   }
   function canvasSize() {
-    const cv = document.querySelector('.br-canvas');
+    const cv = document.querySelector('.br-canvas, .tl-box');
     if (!cv) return;
     const top = cv.getBoundingClientRect().top + window.scrollY;
     cv.style.setProperty('height', `${Math.max(360, window.innerHeight - top - 12)}px`);
@@ -493,7 +521,69 @@
     if (ui.brFocus) { showNode(ui.brSel); ui.brFocus = false; }
     requestAnimationFrame(() => { brWires(cv); brHoverWires(cv); });
   }
+  // crossing the narrow line changes the tree's shape: draw it again and fit it
+  if (NARROW.addEventListener) NARROW.addEventListener('change', () => { view = null; ui.brHelpOpen = !NARROW.matches; if (ui.view === 'brain') render(); });
   window.addEventListener('resize', () => { if (ui.view === 'brain') { canvasSize(); brDrawerSize(); brWires(document); } });
+
+  // ---- the Timeline layout: today on one clock, a lane per session, its helpers under it (as in a trace viewer)
+  const TL_HELPERS = 6;
+  let tlScroll = Number(store.get(sessionStorage, 'threads-tl-scroll')) || 0;
+  function brTimeline(B) {
+    const T = B.today || { rows: [], from: Date.now(), to: Date.now() };
+    const byId = new Map(B.nodes.map((n) => [n.id, n]));
+    const rows = T.rows.map((r) => ({ p: B.projects.find((p) => p.key === r.key), lanes: r.lanes.filter((l) => byId.has(l.id)) })).filter((r) => r.p && r.lanes.length);
+    const box = (kids) => h('section', { class: 'tl-box', tabindex: '0', 'aria-label': 'Today on one clock: one lane per session, its busy stretches as bars',
+      onclick: (e) => { if (ui.brSel && !e.target.closest('.tl-lane, .br-drawer')) { ui.brSel = null; render(); } } }, kids);
+    if (!rows.length) return box(empty(B.nodes.length ? 'No session on the tree has run today yet.' : 'Nothing ran today yet.'));
+    const first = Math.min(...rows.flatMap((r) => r.lanes.flatMap((l) => l.spans.map((x) => x[0]))));
+    const a = new Date(first); a.setMinutes(0, 0, 0);
+    const from = a.getTime(), now = T.to, to = Math.max(now, from + 3600000), span = to - from;
+    const pct = (t) => `${(100 * (t - from)) / span}%`;
+    const step = span > 12 * 3600000 ? 3 : span > 6 * 3600000 ? 2 : 1;
+    const ticks = [];
+    for (let t = from; t <= to; t += step * 3600000) ticks.push(t);
+    const bars = (spans) => spans.map(([p, q]) => h('i', { class: 'tl-bar', title: p === q ? hhmm(p) : `${hhmm(p)} to ${hhmm(q)}`, style: { left: pct(p), width: `${Math.max(0, (100 * (q - p)) / span)}%` } }));
+    const track = (spans) => h('div', { class: 'tl-track' }, bars(spans));
+    const pick = (id) => ({ onclick: () => brSelect(id), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); brSelect(id); } } });
+    const lane = (n, L) => {
+      const sel = ui.brSel === n.id;
+      const more = L.helpers.length - TL_HELPERS;
+      return h('div', { class: `tl-sess${sel ? ' sel' : ''}`, 'data-id': n.id },
+        h('div', { class: `tl-lane s-${n.st}`, role: 'button', tabindex: '0', 'aria-pressed': sel ? 'true' : 'false',
+          'aria-label': `${nodeName(n)}: ${BR[n.st][1]}${n.waitJob ? ', waiting on a job' : ''}. Busy ${L.spans.length} ${L.spans.length === 1 ? 'stretch' : 'stretches'} today, from ${hhmm(L.spans[0][0])}`, ...pick(n.id) },
+          h('span', { class: 'tl-name' }, brG(n.st), brChip(n.model), h('span', { class: 'br-nm', text: nodeName(n) }), n.entry === 'headless' ? h('span', { class: 'br-hl', text: 'headless' }) : null),
+          track(L.spans), brTag(n.st, n)),
+        L.helpers.slice(0, TL_HELPERS).map((x) => h('div', { class: `tl-lane tl-help s-${x.st}`, title: `${x.role}: ${BR[x.st][1]}`, onclick: () => brSelect(n.id) },
+          h('span', { class: 'tl-name' }, brG(x.st), brChip(x.model), h('span', { class: 'br-nm', text: `▸ ${x.role}` })),
+          track(x.spans), h('span', { class: 'br-st', text: `${BR[x.st][0]} ${BR_TAG[x.st]}` }))),
+        more > 0 ? h('div', { class: 'br-more tl-more', text: `+${plural(more, 'more helper')}` }) : null);
+    };
+    const axis = h('div', { class: 'tl-lane tl-axis', 'aria-hidden': 'true' }, h('span', { class: 'tl-name', text: `${md(T.from)} · today` }),
+      h('div', { class: 'tl-track' }, ticks.map((t, k) => h('span', { class: `tl-tick${k % 2 ? ' odd' : ''}`, style: { left: pct(t) }, text: hhmm(t) })),
+        h('span', { class: `tl-nowl${now - from > 0.9 * span ? ' end' : ''}`, style: { left: pct(now) }, text: 'now' })), h('span', {}));
+    const groups = rows.map(({ p, lanes }) => h('div', { class: 'tl-group' },
+      h('div', { class: `tl-proj s-${p.st}` }, brG(p.st), h('b', { text: p.label }), h('span', { class: 'br-eff', text: plural(lanes.length, 'session') })),
+      lanes.map((l) => lane(byId.get(l.id), l))));
+    const nowLine = h('div', { class: 'tl-over', 'aria-hidden': 'true' }, h('span', {}), h('div', { class: 'tl-overt' }, h('i', { class: 'tl-now', style: { left: pct(now) } })), h('span', {}));
+    const wrap = h('div', { class: 'tl-wrap', style: { '--hr': `${(100 * 3600000 * step) / span}%` } }, axis, groups, nowLine);
+    return box(wrap);
+  }
+  function timelineInit() {
+    const box = document.querySelector('.tl-box');
+    if (!box) return;
+    canvasSize();
+    brDrawerSize(); brDrawerGrip();
+    box.scrollTop = tlScroll;
+    box.addEventListener('scroll', () => { tlScroll = box.scrollTop; store.set(sessionStorage, 'threads-tl-scroll', String(tlScroll)); }, { passive: true });
+    if (ui.brFocus && ui.brSel) {
+      const n = box.querySelector(`.tl-sess[data-id="${CSS.escape(ui.brSel)}"]`), d = document.querySelector('.br-drawer');
+      if (n) {
+        const R = box.getBoundingClientRect(), r = n.getBoundingClientRect(), limit = R.bottom - (d ? d.offsetHeight : 0) - 16;
+        if (r.bottom > limit) box.scrollTop += r.bottom - limit; else if (r.top < R.top + 40) box.scrollTop -= R.top + 40 - r.top;
+      }
+      ui.brFocus = false;
+    }
+  }
 
   function renderBrain() {
     const B = data.brain;
@@ -501,10 +591,10 @@
     const sel = ui.brSel ? B.nodes.find((n) => n.id === ui.brSel) || null : null;
     const hint = B.empty ? h('div', { class: 'br-hint', text: 'No Claude Code sessions found yet. Start one in any folder; it shows up here within 20 seconds.' })
       : !B.hooks ? h('div', { class: 'br-hint', text: 'Status hooks are not installed: "awaiting you" needs them (hooks/README.md).' }) : null;
-    const tree = B.nodes.length ? brTree(B) : h('div', { class: 'br-graph br-tree' }, h('div', { class: 'br-row0' }, h('div', { class: 'br-n br-root s-idle', 'data-id': 'you' },
+    const tree = ui.brLayout === 'timeline' ? null : B.nodes.length ? brTree(B) : h('div', { class: 'br-graph br-tree' }, h('div', { class: 'br-row0' }, h('div', { class: 'br-n br-root s-idle', 'data-id': 'you' },
       h('div', { class: 'br-l1' }, brG('idle'), h('span', { class: 'br-nm', text: 'YOU' })), h('div', { class: 'br-l2' }, h('span', { text: B.empty ? 'no sessions yet' : 'nothing on the tree: quiet for 2 hours' })))));
     return [brStrip(B), hint, ui.brDone ? brDoneList(B) : null, ui.brParkOpen && B.parked.length ? brParkList(B) : null, h('div', { class: 'br-fb' }, fbNode('br')),
-      h('div', { class: 'br-stage' }, canvas([tree], helpersBox(B)), sel ? brDrawer(sel) : null)];
+      h('div', { class: 'br-stage' }, ui.brLayout === 'timeline' ? brTimeline(B) : canvas([tree], helpersBox(B)), sel ? brDrawer(sel) : null)];
   }
 
   // ---------------------------------------------------------------- Details
@@ -659,7 +749,7 @@
     const active = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('br-q');
     const body = RENDER[ui.view]();
     $('content').replaceChildren(h('div', { class: 'br' }, header(), body));
-    if (ui.view === 'brain') canvasInit();
+    if (ui.view === 'brain') { if (ui.brLayout === 'timeline') timelineInit(); else canvasInit(); }
     if (active) { const q = document.querySelector('.br-q'); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
   }
   const visible = () => document.visibilityState !== 'hidden';
