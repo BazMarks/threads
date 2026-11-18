@@ -43,3 +43,27 @@ on their machine. It listens on 127.0.0.1 only and sends nothing anywhere.
 ## Adding a source
 
 Write a module with the exports of `lib/sources/claude.mjs` and switch to it in `lib/sources/index.mjs`.
+
+## Adding a feature or another app's data
+
+To show another app's data in Threads (a plan graph, a task board), or to use Threads' data inside it, read the
+sessions and agents with the same calls the server makes; no server, page or key is needed:
+
+```js
+import * as source from './lib/sources/index.mjs';
+import { collect, buildBrain } from './lib/brain.mjs';
+import { createUsageCache, loadPrices } from './lib/usage.mjs';
+import { readTeam } from './lib/team.mjs';
+
+const P = source.locate({});                    // Claude Code's folders (~/.claude by default)
+const team = await readTeam(P.agentsDir);
+const c = await collect({ P, cache: createUsageCache(), prices: loadPrices(), team });
+const B = await buildBrain(c.sess, { dataDir: './data', total: c.total, team });
+// B.projects: each project and its state. B.nodes: each session with its state (run, await, wait, idle, done),
+// model, effort, tokens, dollars, minutes and its helpers (role, state, model, effort, tokens).
+```
+
+- A new tab: add a route to `GET_ROUTES` in `server.mjs`; in `public/app.js` add its `VIEWS`, `data`, `ENDPOINT` and
+  `RENDER` entries and a `render…` function. The page fetches `/api/<name>` with its key, like the other tabs.
+- The other app's own data stays in that app's files or database; read it in the new route. Keep the payload rules
+  above for anything that comes from Claude Code.
