@@ -76,6 +76,10 @@ hooks its own state wins.
   A session can also name itself: `node hooks/status.mjs --task "fix the login page"` (48 characters at most).
 - **Outcome lines**: the lead says what a job came to, in its own words (80 characters at most):
   `node hooks/status.mjs --job "Gallery" --outcome "6 pages built, links checked"`.
+- **Needs you**: the lead turns a job's card red with its reason, until you press "Done, I've handled it":
+  `node hooks/status.mjs --job "Gallery" --needs "Pick one of 3 colourways"` (`--needs-clear` takes it away).
+- **Outputs**: the lead registers a file or local page for a job and its card gets an "Open output" button:
+  `node hooks/status.mjs --job "Gallery" --output "/abs/path/index.html" --output-label "6 pages"` (the path stays on the server).
 - **Project names, job groups and more folders**: `config.json` (git-ignored), e.g.
   `{"projectNames": {"my-repo": "Website"}, "claudeDirs": ["/path/to/another/.claude"]}`. `"jobGroups":
   {"<a helper's exact description>": "<Job>"}` puts a helper that was not named `<Job>: <step>` under a job. Without `--claude`, both

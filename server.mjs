@@ -3,7 +3,8 @@
 // Every /api/* answer holds numbers and names only: counts, times, state, model and effort words, tool / skill /
 // helper / MCP server / hook / plugin / command names, script file names, frontmatter description lines, project
 // labels and the display names set for them in config.json, a session's own --task label, a helper's own short label and its job's name
-// (each cleaned, 48 characters at most), a job's outcome line (the lead's own words, 80 at most) and hashed ids. AGENTS.md has the full list.
+// (each cleaned, 48 characters at most), a job's outcome line and "needs you" reason (the lead's own words, 80 at most),
+// whether a job has an output with its label and type word (never its path) and hashed ids. AGENTS.md has the full list.
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -18,7 +19,8 @@ import { createDetailsReader, spendOf } from './lib/details.mjs';
 import { createUsageReader } from './lib/toolusage.mjs';
 import { listTools } from './lib/tools.mjs';
 import { readTeam, modelsFor, setTeam, lastChanges, EFFORTS } from './lib/team.mjs';
-import { markSeen, markPark, pruneLive } from './lib/states.mjs';
+import { markSeen, markPark, markHandled, pruneLive } from './lib/states.mjs';
+import { readOutputs, openOutput, systemOpener } from './lib/outputs.mjs';
 import * as source from './lib/sources/index.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -133,8 +135,13 @@ async function brainNow() {
   const c = await collected();
   const d = details.current();
   const cfg = readConfig(CONFIG);
-  return { c, B: await buildBrain(c.sess, { dataDir: DATA, total: c.total, team: c.team, spend: d ? spendOf(d) : null, pricesAsOf: (PRICES && PRICES.as_of) || '', names: cfg.projectNames, groups: cfg.jobGroups, now: Date.now() }) };
+  const keys = new Map(); // j-id -> "<session>\n<job>", kept on the server
+  const B = await buildBrain(c.sess, { dataDir: DATA, total: c.total, team: c.team, spend: d ? spendOf(d) : null, pricesAsOf: (PRICES && PRICES.as_of) || '', names: cfg.projectNames, groups: cfg.jobGroups, keys, now: Date.now() });
+  const onTree = new Set(B.jobs.map((j) => j.id));
+  for (const id of keys.keys()) if (!onTree.has(id)) keys.delete(id);
+  return { c, B, keys };
 }
+const OPENER = systemOpener();
 
 const GET_ROUTES = {
   '/api/brain': async () => (await brainNow()).B,
@@ -150,6 +157,19 @@ const POST_ROUTES = {
   '/api/seen': (body) => markSeen(path.join(DATA, 'seen.jsonl'), body),
   '/api/park': (body) => markPark(path.join(DATA, 'parked.jsonl'), body),
   '/api/name': async (body) => setProjectName(CONFIG, body, new Set((await brainNow()).B.projects.map((p) => p.base))),
+};
+// one job's actions: POST /api/jobs/<j-id>/open {output?: n} opens an output the lead registered; .../handled clears "needs you"
+const JOBS = '/api/jobs';
+const JOB_ROUTE = /^\/api\/jobs\/(j-[a-f0-9]{16})\/(open|handled)$/;
+const JOB_ACTIONS = {
+  open: async (id, body) => openOutput({ jobKey: (await brainNow()).keys.get(id), outputs: await readOutputs(path.join(DATA, 'outputs.jsonl')), body, opener: OPENER }),
+  handled: async (id, body) => {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) return { status: 400, body: { ok: false, error: 'expected {}' } };
+    const { B, keys } = await brainNow();
+    const j = B.jobs.find((x) => x.id === id);
+    if (!j || !j.needs) return { status: 404, body: { ok: false, error: 'this job does not need you' } };
+    return markHandled(path.join(DATA, 'needs.jsonl'), keys.get(id));
+  },
 };
 
 async function handle(req, res) {
@@ -168,7 +188,8 @@ async function handle(req, res) {
   }
   if (p.startsWith('/api/')) {
     if (!tokenOk(req)) return fail(res, 401, 'missing or wrong X-Threads-Token: reload the page');
-    const get = GET_ROUTES[p], post = POST_ROUTES[p];
+    const jm = p.startsWith(`${JOBS}/`) ? JOB_ROUTE.exec(p) : null;
+    const get = GET_ROUTES[p], post = POST_ROUTES[p] || (jm ? (body) => JOB_ACTIONS[jm[2]](jm[1], body) : null);
     if (!get && !post) return fail(res, 404, 'unknown endpoint');
     if (req.method === 'GET' && get) {
       try { return sendJson(res, 200, await get()); } catch (e) { logErr(`${p} failed: ${e && (e.code || e.name) || 'error'}`); return fail(res, 500, 'internal error'); }

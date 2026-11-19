@@ -49,7 +49,7 @@ function request(port, method, p, { headers = {}, body = null } = {}) {
  * Starts node server.mjs on a free port with the given folders. The config and catalog paths always point inside a
  * temp folder, so a developer's own files never enter a test.
  */
-export async function startServer({ claudeDir, dataDir, args = [], catalogText = null, configText = null }) {
+export async function startServer({ claudeDir, dataDir, args = [], catalogText = null, configText = null, env = {} }) {
   const port = await freePort();
   const own = tmpDir();
   const catalogFile = path.join(own, 'tools-catalog.json');
@@ -57,7 +57,7 @@ export async function startServer({ claudeDir, dataDir, args = [], catalogText =
   const configFile = path.join(own, 'config.json');
   if (configText != null) fs.writeFileSync(configFile, configText);
   const child = spawn(process.execPath, [path.join(REPO, 'server.mjs'), '--port', String(port), '--claude', claudeDir, '--data', dataDir,
-    '--catalog', catalogFile, '--config', configFile, ...args], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CLAUDE_CONFIG_DIR: '' } });
+    '--catalog', catalogFile, '--config', configFile, ...args], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CLAUDE_CONFIG_DIR: '', THREADS_TEST_OPENER: '', ...env } });
   let out = '', err = '';
   child.stdout.on('data', (c) => { out += c; });
   child.stderr.on('data', (c) => { err += c; });

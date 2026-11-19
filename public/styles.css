@@ -124,6 +124,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* a job card: one branch under its lead; its helpers are small rows inside it */
 .br-job { width: 236px; min-width: 0; max-width: none; }
 .br-out { font-size: 11px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* needs you: the lead's reason, red, on the card itself; outputs: one button each, green once the job is done */
+.br-need { font-size: 11.5px; font-weight: 700; color: var(--await); overflow-wrap: anywhere; }
+.br-btn.br-need-ok { border-color: var(--await); color: var(--await); }
+.br-outs { display: flex; flex-direction: column; gap: 4px; padding-top: 2px; min-width: 0; }
+.br-outs.in { flex-direction: row; flex-wrap: wrap; padding-top: 0; }
+.br-btn.br-open { max-width: 100%; min-width: 0; justify-content: flex-start; color: var(--ink2); }
+.br-btn.br-open.go { border-color: var(--done); background: var(--done); color: var(--bg); }
+.br-ol { overflow: hidden; text-overflow: ellipsis; font-weight: 400; min-width: 0; }
+.br-ok { margin-left: auto; padding-left: 4px; font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; opacity: .8; flex: none; }
+.br-look .br-l { font-weight: 700; color: var(--done); }
 .br-jh { display: grid; gap: 2px; border-top: 1px solid var(--line); padding-top: 4px; }
 .br-jr { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink2); white-space: nowrap; min-width: 0; }
 .br-jr .br-chip { transform: scale(.85); }
@@ -334,6 +344,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
   /* jobs: two to a row, the state word under the name */
   .br-jobs { gap: 22px 8px; margin-left: 12px; max-width: calc(2 * 160px + 8px); }
   .br-job { width: 160px; }
+  .br-job .br-open { padding: 0 6px; font-size: 10.5px; overflow: hidden; }
+  .br-job .br-open .br-ol { display: none; }
   .br-job .br-l1 { flex-wrap: wrap; row-gap: 2px; }
   .br-job .br-l1 .br-nm { flex: 1 1 100px; }
   .br-job .br-l1 .br-st { margin-left: 18px; padding-left: 0; }

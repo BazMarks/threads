@@ -12,9 +12,10 @@ import { dedupe, usdOf, burstsOf, createUsageCache, loadPrices, mainFamily } fro
 import { sessionTools, folderClosed, BG_MAX_MS } from '../lib/sesstools.mjs';
 import {
   sessionState, sessionShown, weekStart, markSeen, markPark, parseSeen, parsePark, applyPark, parseLive, pruneLive, nodeId, readLiveDir, jobId, jobState,
-  helperState, jobSeen, jobOf, parseOutcomes,
+  helperState, jobSeen, jobOf, parseOutcomes, parseNeeds, countStates,
 } from '../lib/states.mjs';
 import { main as statusMain, writeLive } from '../hooks/status.mjs';
+import { parseOutputs, readOutputs, kindOf, localUrl, localPath, openerFor, openOutput, OUTPUTS_MAX } from '../lib/outputs.mjs';
 import { collect, buildBrain, sumDid } from '../lib/brain.mjs';
 import { todayTimeline, clipSpans } from '../lib/timeline.mjs';
 import { loadDetails, spendOf } from '../lib/details.mjs';
@@ -407,7 +408,7 @@ test('brain: each row of the fixture table', async () => {
   assert.equal(B.nodes.length, 8);
   assert.deepEqual(B.projects.map((p) => [p.label, p.st, p.n]).sort(), [['alpha', 'run', 4], ['beta', 'await', 4]]);
   // the counts hold the job cards too: A1's reviewer and B2's maker run; B2's three finished jobs are done, to check
-  assert.deepEqual(B.counts, { run: 5, await: 1, wait: 1, idle: 3, done: 0, check: 3 });
+  assert.deepEqual(B.counts, { run: 5, await: 1, wait: 1, idle: 3, done: 0, check: 3, look: 0 });
   assert.equal(B.you.st, 'await'); assert.equal(B.you.sessions, 8); assert.equal(B.you.running, 3);
   assert.equal(B.empty, false); assert.equal(B.hooks, true);
   assert.equal(new Set(B.nodes.map((n) => n.id)).size, B.nodes.length);
@@ -769,4 +770,153 @@ test('source: more Claude folders are read, each session once', async () => {
   for (const f of fs.readdirSync(path.join(b.claudeDir, 'projects', 'moved')).filter((x) => x.endsWith('.jsonl'))) fs.renameSync(path.join(b.claudeDir, 'projects', 'moved', f), path.join(b.claudeDir, 'projects', 'moved', f.replace('aaaaaaaa', 'bbbbbbbb')));
   assert.ok((await source.listSessions(P, NOW - 4 * HOUR)).total > 11, 'a session only in the second home is read');
   assert.equal(source.entryWord('claude-desktop'), 'desktop'); assert.equal(source.entryWord('claude-vscode'), 'ide');
+});
+
+// ---------------------------------------------------------------- needs you and outputs
+test('needs: parseNeeds keeps the newest reason per job, cleaned, 80 characters at most; "" clears it', () => {
+  const s = 'abcdefgh-0000-4000-8000-000000000001';
+  const m = parseNeeds(jl([
+    { at: '2026-03-11T10:00:00Z', session: s, job: 'Site', needs: 'old' },
+    { at: '2026-03-11T11:00:00Z', session: s, job: ' site ', needs: `pick\u0007 one ${'y'.repeat(100)}`, prompt: 'x' },
+    { at: '2026-03-11T11:00:00Z', session: '../x', job: 'site', needs: 'bad session' },
+    { at: 'never', session: s, job: 'site', needs: 'bad time' },
+    { at: '2026-03-11T11:00:00Z', session: s, job: 'gone', needs: 'x' }, { at: '2026-03-11T12:00:00Z', session: s, job: 'Gone', needs: '' },
+    { at: '2026-03-11T11:00:00Z', session: s, job: 'num', needs: 7 },
+  ]) + 'not json\n');
+  assert.deepEqual([...m.keys()], [`${s}\nsite`]);
+  const v = m.get(`${s}\nsite`).text;
+  assert.equal(v.length, 80); assert.ok(v.startsWith('pick one yyy'));
+});
+test('outputs: local targets only, the newest first, one per target, a clear empties the list', () => {
+  const s = 'abcdefgh-0000-4000-8000-000000000001', abs = path.resolve('/srv/out/index.html');
+  const m = parseOutputs(jl([
+    { at: '2026-03-11T10:00:00Z', session: s, job: 'Site', target: abs, label: 'first' },
+    { at: '2026-03-11T10:01:00Z', session: s, job: 'site', target: 'http://127.0.0.1:8080/x', label: 'srv' },
+    { at: '2026-03-11T10:02:00Z', session: s, job: 'site', target: abs, label: `again\u0007 ${'z'.repeat(60)}` },
+    { at: '2026-03-11T10:03:00Z', session: s, job: 'site', target: 'https://example.com/x', label: 'remote' },
+    { at: '2026-03-11T10:03:00Z', session: s, job: 'site', target: 'http://user:pw@localhost/x', label: 'creds' },
+    { at: '2026-03-11T10:03:00Z', session: s, job: 'site', target: 'file:///etc/passwd', label: 'file url' },
+    { at: '2026-03-11T10:03:00Z', session: s, job: 'site', target: 'rel/x.html', label: 'relative' },
+    { at: '2026-03-11T10:03:00Z', session: s, job: 'old', target: abs }, { at: '2026-03-11T10:04:00Z', session: s, job: 'old', clear: true },
+  ]));
+  assert.deepEqual([...m.keys()], [`${s}\nsite`]);
+  const list = m.get(`${s}\nsite`);
+  assert.deepEqual(list.map((x) => x.target), [abs, 'http://127.0.0.1:8080/x']);
+  assert.equal(list[0].label.length, 48); assert.ok(list[0].label.startsWith('again zzz'));
+  const many = parseOutputs(jl(Array.from({ length: 12 }, (_, k) => ({ at: `2026-03-11T10:${String(k).padStart(2, '0')}:00Z`, session: s, job: 'j', target: `http://localhost/${k}` }))));
+  assert.equal(many.get(`${s}\nj`).length, OUTPUTS_MAX); assert.equal(many.get(`${s}\nj`)[0].target, 'http://localhost/11');
+});
+test('outputs: kindOf, localUrl, localPath and the opener of each platform', () => {
+  assert.deepEqual(['a.HTML', 'b.htm', 'c.mp4', 'd.mov', 'e.png', 'f.JPG', 'g.pdf', 'h.md', 'noext'].map((f) => kindOf(path.resolve('/x', f))),
+    ['html', 'html', 'video', 'video', 'image', 'image', 'pdf', 'file', 'file']);
+  assert.equal(kindOf(path.resolve('/x/dir.png'), true), 'folder');
+  assert.equal(kindOf('http://localhost:3000/a.png'), 'url');
+  assert.equal(localUrl('https://127.0.0.1/x'), 'https://127.0.0.1/x');
+  for (const bad of ['https://127.0.0.1.evil.example/', 'http://0.0.0.0/', 'ftp://localhost/', 'http://localhost/a b', 'javascript:alert(1)', 7]) assert.equal(localUrl(bad), '', String(bad));
+  assert.equal(localPath('rel/x'), ''); assert.equal(localPath('http://localhost/'), ''); assert.equal(localPath(path.resolve('/a/../b')), path.resolve('/b'));
+  assert.deepEqual(openerFor('/a b/x.html', 'darwin'), ['open', ['/a b/x.html']]);
+  assert.deepEqual(openerFor('/x.html', 'linux'), ['xdg-open', ['/x.html']]);
+  assert.deepEqual(openerFor('C:\\out\\x.html', 'win32'), ['cmd', ['/c', 'start', '""', 'C:\\out\\x.html']]);
+  assert.equal(openerFor('C:\\out\\a&calc.html', 'win32'), null, 'a cmd metacharacter is never passed to start');
+});
+test('outputs: openOutput opens only a registered target that is there, by number, through the stubbed opener', async () => {
+  const d = tmpDir(), s = 'abcdefgh-0000-4000-8000-000000000001', page = path.join(d, 'index.html'), gone = path.join(d, 'gone.mp4');
+  fs.writeFileSync(page, 'x'); fs.writeFileSync(gone, 'x');
+  fs.writeFileSync(path.join(d, 'outputs.jsonl'), jl([
+    { at: '2026-03-11T10:00:00Z', session: s, job: 'site', target: gone, label: 'film' },
+    { at: '2026-03-11T10:01:00Z', session: s, job: 'site', target: page, label: 'page' },
+  ]));
+  const outputs = await readOutputs(path.join(d, 'outputs.jsonl'));
+  const opened = [];
+  const opener = (t) => { opened.push(t); return true; };
+  const key = `${s}\nsite`;
+  const r = await openOutput({ jobKey: key, outputs, body: {}, opener });
+  assert.equal(r.status, 200); assert.deepEqual(r.body, { ok: true, output: 0, kind: 'html', label: 'page' });
+  assert.ok(!JSON.stringify(r.body).includes(d), 'the answer never holds the path');
+  assert.equal((await openOutput({ jobKey: key, outputs, body: { output: 1 }, opener })).body.kind, 'video');
+  assert.deepEqual(opened, [page, gone]);
+  fs.unlinkSync(gone);
+  const g = await openOutput({ jobKey: key, outputs, body: { output: 1 }, opener });
+  assert.equal(g.status, 404); assert.match(g.body.error, /gone/);
+  assert.equal((await openOutput({ jobKey: undefined, outputs, body: {}, opener })).status, 404, 'an id that is not on the tree');
+  assert.equal((await openOutput({ jobKey: `${s}\nother`, outputs, body: {}, opener })).status, 404, 'a job with no output');
+  for (const body of [{ path: page }, { output: -1 }, { output: 'x' }, { output: 99 }, [], null]) assert.equal((await openOutput({ jobKey: key, outputs, body, opener })).status, 400, JSON.stringify(body));
+  assert.equal((await openOutput({ jobKey: key, outputs, body: {}, opener: () => false })).status, 500);
+  assert.equal(opened.length, 2, 'nothing else was opened');
+});
+test('needs: a job that needs you is red, says why, outranks done and Got it, rolls up to its lead and project, and is never parked', async () => {
+  const h = makeHome(tmpDir(), NOW, { marks: true });
+  const r0 = await brainOf({ h });
+  const b2 = r0.node('B2');
+  const builder = r0.B.jobs.find((x) => x.job === 'builder');
+  assert.equal(builder.st, 'await'); assert.equal(builder.needs, 'Pick one of 3 colourways for the hero');
+  assert.equal(builder.nDone, 1, 'its helper is still finished');
+  assert.equal(b2.st, 'await'); assert.equal(b2.needs, 1); assert.equal(b2.needsOnly, undefined, 'the inner flag stays on the server');
+  const beta = r0.B.projects.find((p) => p.base === 'beta');
+  assert.equal(beta.st, 'await'); assert.equal(beta.needs, 1);
+  assert.equal(r0.B.projects[0].base, 'beta', 'the project that needs you comes first');
+  assert.equal(r0.B.you.st, 'await');
+  // B1 awaits on its own; B2 only through its job: the job counts once
+  assert.equal(r0.B.counts.await, 2);
+  assert.ok(!r0.B.jobs.some((x) => x.job.startsWith('Plan the') && x.needs), 'a cleared reason is gone');
+  await markSeen(path.join(h.dataDir, 'seen.jsonl'), { id: builder.id, name: 'builder' }, NOW + MIN);
+  await markPark(path.join(h.dataDir, 'parked.jsonl'), { id: builder.id, name: 'builder', until: '' }, NOW + MIN);
+  const r1 = await brainOf({ h }, NOW + 2 * MIN);
+  assert.equal(r1.B.jobs.find((x) => x.id === builder.id).st, 'await', 'Got it and Park do not hide a job that needs you');
+  assert.ok(!r1.B.parked.some((x) => x.id === builder.id));
+  fs.appendFileSync(path.join(h.dataDir, 'needs.jsonl'), jl([{ at: new Date(NOW + 3 * MIN).toISOString(), session: h.ids.B2, job: 'Builder', needs: '' }]));
+  const r2 = await brainOf({ h }, NOW + 4 * MIN);
+  assert.ok(!r2.B.jobs.some((x) => x.id === builder.id), 'cleared: Got it and Park apply again');
+  assert.equal(r2.node('B2').st, 'run'); assert.equal(r2.node('B2').needs, undefined);
+});
+test('outputs: a job shows that it has outputs, their labels and type words, never a target; done with one counts to look at', async () => {
+  const h = makeHome(tmpDir(), NOW, { marks: true });
+  const keys = new Map();
+  const P = source.locate({ claudeDir: h.claudeDir });
+  const c = await collect({ P, cache: createUsageCache(), prices: PRICES, team: [], now: NOW });
+  const B = await buildBrain(c.sess, { dataDir: h.dataDir, total: c.total, keys, now: NOW });
+  const g = B.jobs.find((x) => x.job === 'Gallery'), maker = B.jobs.find((x) => x.role === 'maker');
+  assert.equal(g.st, 'done'); assert.equal(g.hasOutput, true);
+  assert.deepEqual(g.outputs, [{ label: 'Gallery: 6 pages', kind: 'html' }, { label: 'Frames', kind: 'folder' }, { label: 'Preview server', kind: 'url' }]);
+  assert.deepEqual(maker.outputs, [{ label: 'First frames', kind: 'image' }], 'a running job can show a partial output');
+  assert.ok(B.jobs.filter((x) => x.outputs).every((x) => x.outputs.every((o) => Object.keys(o).join() === 'label,kind')));
+  assert.equal(B.counts.look, 1, 'a finished job with an output; the running one is not counted');
+  assert.equal(countStates([{ st: 'done', hasOutput: true }, { st: 'done' }, { st: 'await', needsOnly: true }, { st: 'await' }]).look, 1);
+  const text = JSON.stringify(B);
+  for (const t of Object.values(h.outputs)) assert.ok(!text.includes(t));
+  assert.ok(!text.includes('CANARY'));
+  assert.equal(keys.get(g.id), `${h.ids.B2}\ngallery`, 'the server keeps which session and job an id stands for');
+});
+test('hooks: --needs and --needs-clear write the lead\'s reason; --output keeps a target that exists or a local URL', async () => {
+  const d = tmpDir(), s = 'abcdefgh-hook-8', page = path.join(d, 'page.html');
+  fs.writeFileSync(page, 'x');
+  assert.equal((await runHook(d, ['--job', 'Gallery', '--needs', `Pick\u0007 a colour ${'y'.repeat(100)}`, '--session', s])).out, 'needs saved');
+  const v = parseNeeds(fs.readFileSync(path.join(d, 'needs.jsonl'), 'utf8')).get(`${s}\ngallery`).text;
+  assert.equal(v.length, 80); assert.ok(v.startsWith('Pick a colour'));
+  assert.equal((await runHook(d, ['--job', 'gallery', '--needs-clear', '--session', s])).out, 'needs cleared');
+  assert.equal(parseNeeds(fs.readFileSync(path.join(d, 'needs.jsonl'), 'utf8')).size, 0);
+  assert.equal((await runHook(d, ['--job', 'Gallery', '--output', page, '--output-label', `The page\u0007 ${'z'.repeat(60)}`, '--session', s])).out, 'output saved');
+  assert.equal((await runHook(d, ['--job', 'Gallery', '--output', 'http://localhost:5173/', '--session', s])).code, 0);
+  const list = parseOutputs(fs.readFileSync(path.join(d, 'outputs.jsonl'), 'utf8')).get(`${s}\ngallery`);
+  assert.deepEqual(list.map((x) => x.target), ['http://localhost:5173/', page]);
+  assert.equal(list[1].label.length, 48); assert.ok(list[1].label.startsWith('The page zzz'));
+  for (const bad of [path.join(d, 'missing.html'), 'page.html', 'https://example.com/', 'file:///x']) assert.equal((await runHook(d, ['--job', 'Gallery', '--output', bad, '--session', s])).code, 2, bad);
+  assert.equal((await runHook(d, ['--output', page, '--session', s])).code, 2, 'no job');
+  assert.equal((await runHook(d, ['--job', 'Gallery', '--output-label', 'x', '--session', s])).code, 2, 'a label without an output');
+  assert.equal((await runHook(d, ['--job', 'Gallery', '--needs', 'x', '--needs-clear', '--session', s])).code, 2);
+  assert.equal((await runHook(d, ['--job', 'Gallery', '--output-clear', '--session', s])).out, 'outputs cleared');
+  assert.equal(parseOutputs(fs.readFileSync(path.join(d, 'outputs.jsonl'), 'utf8')).size, 0);
+  assert.equal(liveOf(d, s), null, 'none of these touch the session state');
+});
+test('outputs: an output registered after Got it brings the job back to look at; one from before does not', async () => {
+  const h = makeHome(tmpDir(), NOW, { marks: true });
+  const r0 = await brainOf({ h });
+  const plan = r0.B.jobs.find((x) => x.job.startsWith('Plan the'));
+  await markSeen(path.join(h.dataDir, 'seen.jsonl'), { id: plan.id, name: plan.job }, NOW + MIN);
+  assert.ok(!(await brainOf({ h }, NOW + 2 * MIN)).B.jobs.some((x) => x.id === plan.id), 'Got it takes it off');
+  fs.appendFileSync(path.join(h.dataDir, 'outputs.jsonl'), jl([{ at: new Date(NOW + 3 * MIN).toISOString(), session: h.ids.B2, job: plan.job, target: h.outputs.page, label: 'The plan' }]));
+  const back = (await brainOf({ h }, NOW + 4 * MIN)).B.jobs.find((x) => x.id === plan.id);
+  assert.ok(back, 'a new output brings it back'); assert.equal(back.st, 'done'); assert.deepEqual(back.outputs, [{ label: 'The plan', kind: 'html' }]);
+  await markSeen(path.join(h.dataDir, 'seen.jsonl'), { id: plan.id, name: plan.job }, NOW + 5 * MIN);
+  assert.ok(!(await brainOf({ h }, NOW + 6 * MIN)).B.jobs.some((x) => x.id === plan.id), 'Got it again takes it off');
 });

@@ -108,7 +108,9 @@
   const BR = { run: ['●', 'running'], await: ['!', 'awaiting you'], wait: ['⧗', 'waiting'], idle: ['…', 'idle'], done: ['✓', 'done'], off: ['–', 'off the tree'] };
   const BR_TAG = { run: 'RUNNING', await: 'AWAITING YOU', wait: 'WAITING', idle: 'IDLE · to review', done: 'DONE' };
   // a job that stopped before every helper finished is idle; a finished one is done (green) and waits for Got it
-  const tagOf = (st, n) => (n && n.kind === 'job' && st === 'idle' ? 'IDLE · not finished' : BR_TAG[st]);
+  // a job the lead marked "needs you" says so; a finished job with an output says it is ready to look at
+  const tagOf = (st, n) => (n && n.kind === 'job' && n.needs ? 'NEEDS YOU' : n && n.kind === 'job' && st === 'done' && n.hasOutput ? 'DONE · output ready'
+    : n && n.kind === 'job' && st === 'idle' ? 'IDLE · not finished' : BR_TAG[st]);
   const fmtTok = (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}k` : String(Math.round(v || 0)));
   const fmtUsd = (v) => (v == null ? '–' : v >= 100 ? `$${Math.round(v)}` : `$${v.toFixed(2)}`);
   const brTok = (tokens, usd, blank) => (money === 'usd' ? fmtUsd(usd) : !tokens && blank ? '–' : fmtTok(tokens || 0));
@@ -160,7 +162,27 @@
       more > 0 ? h('div', { class: 'br-more', text: `+${plural(more, 'more helper')}` }) : null);
   }
   /** The lead line of a session that drives jobs: how many run and how many are done. */
-  const leadText = (n) => (n.jobs && n.jobs.n ? `lead · ${n.jobs.run} running · ${n.jobs.done} done` : '');
+  const leadText = (n) => (n.jobs && n.jobs.n ? `lead · ${n.needs ? `${n.needs} needs you · ` : ''}${n.jobs.run} running · ${n.jobs.done} done` : '');
+  /** A job's outputs as buttons: each opens what the lead registered, on this computer (the page never sees where it is). */
+  async function brOpen(j, i) {
+    const o = j.outputs[i];
+    const r = await post(`/api/jobs/${j.id}/open`, { output: i });
+    feedback('br', r.ok ? `Opened ${o.label || o.kind} (${o.kind})` : `Not opened: ${r.error || 'failed'}`, !r.ok);
+    if (!r.ok) load('brain');
+  }
+  function brOutputs(j, cls = 'br-outs') {
+    const list = j.outputs || [];
+    if (!list.length) return null;
+    const ready = j.st === 'done';
+    return h('div', { class: cls }, list.map((o, i) => h('button', { class: `br-btn br-open${ready ? ' go' : ''}`, type: 'button',
+      title: `Open ${o.label || 'the output'} (${o.kind}) on this computer${ready ? '' : ': the job is still going, so it may be partial'}`, onclick: brStop(() => brOpen(j, i)) },
+    h('span', { text: '↗ Open output' }), o.label ? h('span', { class: 'br-ol', text: o.label }) : null, h('span', { class: 'br-ok', text: o.kind }))));
+  }
+  async function brHandled(j) {
+    const r = await post(`/api/jobs/${j.id}/handled`, {});
+    await load('brain');
+    feedback('br', r.ok ? `✓ ${nodeName(j)}: handled` : `Not saved: ${r.error || 'failed'}`, !r.ok);
+  }
 
   // ---------------------------------------------------------------- header
   function header() {
@@ -205,6 +227,7 @@
   }
   const brStop = (fn) => (e) => { e.stopPropagation(); fn(); };
   function brActs(n, cls = 'br-acts') {
+    if (n.kind === 'job' && n.needs) return h('div', { class: cls }, h('button', { class: 'br-btn br-need-ok', type: 'button', title: 'You have dealt with it: the card goes back to its own state', onclick: brStop(() => brHandled(n)) }, "Done, I've handled it"));
     if (n.st !== 'idle' && !(n.kind === 'job' && n.st === 'done')) return null;
     return h('div', { class: cls }, h('button', { class: 'br-btn ok', type: 'button', title: n.st === 'done' ? 'Checked: it leaves the tree and counts in done this week' : 'Seen: it leaves the tree and counts in done this week', onclick: brStop(() => brGotIt(n)) }, 'Got it'));
   }
@@ -228,9 +251,10 @@
     const l2 = h('div', { class: 'br-l2' }, brChip(j.model), h('span', { text: jobWho(j) }), j.n > 1 ? h('span', { class: 'br-eff', text: `${j.nDone}/${j.n} done` }) : h('span', { class: 'br-eff', text: j.effort || '' }),
       h('span', { class: 'br-push br-tok', text: brTok(j.tokens, j.usd, true) }), h('span', { class: 'br-min', text: brMin(j.min) }), j.back ? h('span', { class: 'br-back', text: '↩ back from park' }) : null);
     return h('div', { class: `br-n br-c br-job s-${j.st}${sel ? ' sel' : ''}`, 'data-id': j.id, tabindex: '0', role: 'button', 'aria-pressed': sel ? 'true' : 'false',
-      'aria-label': `Job ${nodeName(j)} (${jobWho(j)}): ${BR[j.st][1]}${j.outcome ? `. Outcome: ${j.outcome}` : ''}${(j.bgw || []).length ? `, background ${bgText(j.bgw[0])} running` : ''}. Press for what it did`,
+      'aria-label': `Job ${nodeName(j)} (${jobWho(j)}): ${j.needs ? `needs you: ${j.needs}` : BR[j.st][1]}${j.hasOutput ? `, ${plural(j.outputs.length, 'output')} to open` : ''}${j.outcome ? `. Outcome: ${j.outcome}` : ''}${(j.bgw || []).length ? `, background ${bgText(j.bgw[0])} running` : ''}. Press for what it did`,
       onclick: () => brSelect(j.id), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); brSelect(j.id); } } }, l1, l2,
-      j.outcome ? h('div', { class: 'br-out', text: `→ ${j.outcome}`, title: `Outcome: ${j.outcome}` }) : null, brJobRows(j), brTool(j), brBgw(j), brActs(j));
+      j.needs ? h('div', { class: 'br-need', text: `! ${j.needs}`, title: `Needs you: ${j.needs}` }) : null,
+      j.outcome ? h('div', { class: 'br-out', text: `→ ${j.outcome}`, title: `Outcome: ${j.outcome}` }) : null, brOutputs(j), brJobRows(j), brTool(j), brBgw(j), brActs(j));
   }
   /** A project's name; a click renames it (kept in the local config.json). */
   function brProjName(p) {
@@ -271,7 +295,8 @@
       });
       return h('div', { class: 'br-pcol' },
         h('div', { class: `br-n br-mini br-proj s-${p.st}`, 'data-id': p.key, title: `${p.label}: ${plural(p.n, 'session')} and ${plural(p.jobs || 0, 'job')} on the tree` }, brG(p.st), brProjName(p),
-          h('span', { class: 'br-eff', text: p.jobs ? `${plural(p.n, 'lead')} · ${plural(p.jobs, 'job')}` : plural(p.n, 'session') })),
+          h('span', { class: 'br-eff', text: p.jobs ? `${plural(p.n, 'lead')} · ${plural(p.jobs, 'job')}` : plural(p.n, 'session') }),
+          p.needs ? h('span', { class: 'br-st', text: `! ${p.needs} needs you` }) : null),
         h('div', { class: 'br-col' }, items, p.more ? h('div', { class: 'br-more', text: `+${p.more} older` }) : null));
     });
     const g = h('section', { class: 'br-graph br-tree', 'aria-label': 'You, your projects and their sessions' }, s('svg', { class: 'br-wires', 'aria-hidden': 'true' }),
@@ -359,6 +384,7 @@
     feedback('br', r.ok ? label : `Not saved: ${r.error || 'failed'}`, !r.ok);
   }
   function brParkCtl(n) {
+    if (n.needs) return null; // a job that needs you stays on the tree
     const date = h('input', { class: 'br-date', type: 'date', value: nextSaturday(), 'aria-label': 'Back on (optional)', title: 'Back on this day (optional)' });
     const name = nodeName(n).slice(0, 40);
     return h('span', { class: 'br-park' }, h('button', { class: 'br-btn', type: 'button', title: 'Off the tree until the date; it is not done',
@@ -417,6 +443,8 @@
       h('button', { class: 'br-btn br-close', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: close }, '×'));
     const ago = brAgo(j);
     const left = h('div', { class: 'br-dl' },
+      j.needs ? h('div', { class: 'br-outcome br-need', title: 'The lead session needs you for this job' }, h('span', { class: 'br-eff', text: 'needs you ' }), j.needs) : null,
+      brOutputs(j, 'br-outs in'),
       j.outcome ? h('div', { class: 'br-outcome', title: 'The outcome line the lead session wrote for this job' }, h('span', { class: 'br-eff', text: 'outcome ' }), j.outcome)
         : h('div', { class: 'br-dm', text: 'No outcome line yet: the lead can write one (hooks/README.md).' }),
       h('div', { class: 'br-dm', text: `job · ${jobWho(j)}${j.n > 1 ? ` · ${j.nDone} of ${j.n} done` : ''}${j.started ? ` · started ${when(j.started)}` : ''}` }),
@@ -482,7 +510,8 @@
       h('span', { class: 'br-ratio', text: rTxt }));
     const done = h('button', { class: `br-cell s-done br-donec${ui.brDone ? ' on' : ''}`, type: 'button', 'aria-expanded': ui.brDone ? 'true' : 'false', title: 'Done since Monday 00:00: click for the list',
       onclick: () => { ui.brDone = !ui.brDone; render(); } }, brG('done'), h('span', { class: 'br-n1', text: String(C.done) }), h('span', { class: 'br-l', text: 'done this week' }));
-    return h('section', { class: 'br-strip', 'aria-label': 'The five states' }, cell('await', C.await, 'awaiting you'), cell('idle', C.idle, 'idle'), cell('run', C.run, 'running'), cell('wait', C.wait, 'waiting'), spend, C.check ? cell('done', C.check, 'done · to check') : null, done,
+    return h('section', { class: 'br-strip', 'aria-label': 'The five states' }, cell('await', C.await, 'awaiting you'), cell('idle', C.idle, 'idle'), cell('run', C.run, 'running'), cell('wait', C.wait, 'waiting'), spend, C.check ? cell('done', C.check, 'done · to check') : null,
+      C.look ? h('div', { class: 'br-cell s-done br-look', title: 'Finished jobs with an output to open' }, h('span', { class: 'br-g', text: '↗', 'aria-hidden': 'true' }), h('span', { class: 'br-n1', text: String(C.look) }), h('span', { class: 'br-l', text: 'to look at' })) : null, done,
       B.parked.length ? h('button', { class: `br-cell br-parkc${ui.brParkOpen ? ' on' : ''}`, type: 'button', 'aria-expanded': ui.brParkOpen ? 'true' : 'false', title: 'Parked: off the tree until their date', onclick: () => { ui.brParkOpen = !ui.brParkOpen; render(); } },
         h('span', { class: 'br-g', text: '⏸', 'aria-hidden': 'true' }), h('span', { class: 'br-l', text: `parked ${B.parked.length}` })) : null);
   }
@@ -664,7 +693,7 @@
         L.helpers.filter((x) => jobById.has(x.id)).slice(0, TL_HELPERS).map((x) => {
           const j = jobById.get(x.id), jsel = ui.brSel === j.id;
           return h('div', { class: `tl-lane tl-help s-${j.st}${jsel ? ' sel' : ''}`, 'data-id': j.id, role: 'button', tabindex: '0', 'aria-pressed': jsel ? 'true' : 'false',
-            'aria-label': `Job ${nodeName(j)} (${jobWho(j)}): ${BR[j.st][1]}`, title: `${nodeName(j)} · ${jobWho(j)}: ${BR[j.st][1]}${j.outcome ? ` · ${j.outcome}` : ''}`, ...pick(j.id) },
+            'aria-label': `Job ${nodeName(j)} (${jobWho(j)}): ${BR[j.st][1]}`, title: `${nodeName(j)} · ${jobWho(j)}: ${j.needs ? `needs you: ${j.needs}` : BR[j.st][1]}${j.hasOutput ? ' · output ready' : ''}${j.outcome ? ` · ${j.outcome}` : ''}`, ...pick(j.id) },
             h('span', { class: 'tl-name' }, brG(j.st), brChip(j.model), h('span', { class: 'br-nm', text: `▸ ${nodeName(j)}` }), h('span', { class: 'br-eff', text: jobWho(j) })),
             track(x.spans), h('span', { class: 'br-st', text: stText(j.st, j) }));
         }),
@@ -674,7 +703,8 @@
       h('div', { class: 'tl-track' }, ticks.map((t, k) => h('span', { class: `tl-tick${k % 2 ? ' odd' : ''}`, style: { left: pct(t) }, text: hhmm(t) })),
         h('span', { class: `tl-nowl${now - from > 0.9 * span ? ' end' : ''}`, style: { left: pct(now) }, text: 'now' })), h('span', {}));
     const groups = rows.map(({ p, lanes }) => h('div', { class: 'tl-group' },
-      h('div', { class: `tl-proj s-${p.st}` }, brG(p.st), brProjName(p), h('span', { class: 'br-eff', text: `${plural(lanes.length, 'session')}${p.jobs ? ` · ${plural(p.jobs, 'job')}` : ''}` })),
+      h('div', { class: `tl-proj s-${p.st}` }, brG(p.st), brProjName(p), h('span', { class: 'br-eff', text: `${plural(lanes.length, 'session')}${p.jobs ? ` · ${plural(p.jobs, 'job')}` : ''}` }),
+        p.needs ? h('span', { class: 'br-st', text: `! ${p.needs} needs you` }) : null),
       lanes.map((l) => lane(byId.get(l.id), l))));
     const nowLine = h('div', { class: 'tl-over', 'aria-hidden': 'true' }, h('span', {}), h('div', { class: 'tl-overt' }, h('i', { class: 'tl-now', style: { left: pct(now) } })), h('span', {}));
     const wrap = h('div', { class: 'tl-wrap', style: { '--hr': `${(100 * 3600000 * step) / span}%` } }, axis, groups, nowLine);

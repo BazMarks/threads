@@ -50,7 +50,7 @@ function writeText(file, text, mtime = null) {
  * Writes the home under root. -> {claudeDir, dataDir, workDir, ids, CANARY, toolUseIds, folders, responses}
  * ids: {A1..A6, B1..B5, T1?, G1..}; CANARY: {where: string}; responses: unique response ids in the last 15 days.
  */
-export function makeHome(root, now = Date.now(), { empty = false, twin = false, many = 0 } = {}) {
+export function makeHome(root, now = Date.now(), { empty = false, twin = false, many = 0, marks = false } = {}) {
   const claudeDir = path.join(root, 'home', '.claude');
   const dataDir = path.join(root, 'data');
   const workDir = path.join(root, 'work');
@@ -215,6 +215,34 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
       ].map((l) => JSON.stringify(l)).join('\n') + '\n');
     }
   }
+  // marks: B2's "builder" job needs you (the lead's reason), Gallery has outputs to open (a page, a folder, a local
+  // URL) and Mint video a partial one; the targets stay on the server and hold canaries, as do the dropped lines
+  if (marks) {
+    const s2 = out.ids.B2;
+    const site = path.join(root, `out-${C('outputpath')}`);
+    fs.mkdirSync(path.join(site, 'frames'), { recursive: true });
+    writeText(path.join(site, 'index.html'), '<p>gallery</p>');
+    writeText(path.join(site, 'frames', 'f001.png'), 'x');
+    out.outputs = { page: path.join(site, 'index.html'), folder: path.join(site, 'frames'), partial: path.join(site, 'frames', 'f001.png'), url: `http://127.0.0.1:9/${C('outputurl')}` };
+    const ol = (job, target, label, extra = {}) => ({ at: iso(now - 40 * MIN), session: s2, job, target, label, ...extra });
+    writeText(path.join(dataDir, 'outputs.jsonl'), [
+      ol('Gallery', out.outputs.url, 'Preview server', { note: C('outputnote') }),
+      ol('Gallery', out.outputs.folder, 'Frames'),
+      { ...ol('gallery', out.outputs.page, 'Gallery: 6 pages'), at: iso(now - 39 * MIN) },
+      ol('Gallery', `https://example.com/${C('outputremote')}`, `remote ${C('outputremotelabel')}`),
+      ol('Gallery', `relative-${C('outputrel')}/x.html`, 'relative'),
+      ol('Gallery', path.join(root, `missing-${C('outputmissing')}.mp4`), `gone ${C('outputgonelabel')}`),
+      ol('Blender recreation, 6 variations', out.outputs.partial, 'First frames'),
+      ol('no such job', out.outputs.page, `never shown ${C('outputjob')}`),
+    ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+    writeText(path.join(dataDir, 'needs.jsonl'), [
+      { at: iso(now - 45 * MIN), session: s2, job: 'builder', needs: 'old reason' },
+      { at: iso(now - 44 * MIN), session: s2, job: 'builder', needs: 'Pick one of 3 colourways\u0007 for the hero', prompt: C('needskey') },
+      { at: iso(now - 44 * MIN), session: s2, job: `Plan the Threads job cards ${'z'.repeat(60)}`.slice(0, 48), needs: `cleared later ${C('needscleared')}` },
+      { at: iso(now - 43 * MIN), session: s2, job: `plan the threads job cards ${'z'.repeat(60)}`, needs: '' },
+      { at: iso(now - 44 * MIN), session: sid(987654), job: 'builder', needs: `another session ${C('needssession')}` },
+    ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  }
   live(simple('B3', 300, 'claude-fable-5').session, 'idle', now - 300 * MIN);
   live(simple('B4', 20).session, 'waiting', now - 20 * MIN, { sticky: true, task: 'tidy the test data' });
   // B5: twenty days old; a skill and an MCP call (counted by the tool usage only)
@@ -272,7 +300,7 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const dir = process.argv[2];
   if (!dir) { console.error('usage: node test/fixtures.mjs <dir>'); process.exit(2); }
-  const h = makeHome(path.resolve(dir), Date.now(), { twin: true });
+  const h = makeHome(path.resolve(dir), Date.now(), { twin: true, marks: true });
   const server = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.mjs');
   // a display name for one project, as a user's own config.json would hold it
   const config = path.join(path.resolve(dir), 'config.json');
