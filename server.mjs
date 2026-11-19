@@ -2,7 +2,8 @@
 // Threads: a local page of your Claude Code sessions. Listens on 127.0.0.1 only, reads local files, sends nothing.
 // Every /api/* answer holds numbers and names only: counts, times, state, model and effort words, tool / skill /
 // helper / MCP server / hook / plugin / command names, script file names, frontmatter description lines, project
-// labels, a session's own --task label (cleaned, 48 characters at most) and hashed ids. AGENTS.md has the full list.
+// labels and the display names set for them in config.json, a session's own --task label, a helper's own short label and its job's name
+// (each cleaned, 48 characters at most), a job's outcome line (the lead's own words, 80 at most) and hashed ids. AGENTS.md has the full list.
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, USAGE } from './lib/config.mjs';
+import { parseArgs, USAGE, readConfig, setProjectName } from './lib/config.mjs';
 import { createUsageCache, loadPrices } from './lib/usage.mjs';
 import { collect, buildBrain } from './lib/brain.mjs';
 import { createDetailsReader, spendOf } from './lib/details.mjs';
@@ -32,7 +33,8 @@ if (args.error) { console.error(`[threads] ${args.error}\n${USAGE}`); process.ex
 if (args.help) { console.log(USAGE); process.exit(0); }
 if (args.version) { console.log(VERSION); process.exit(0); }
 
-const P = source.locate({ claudeDir: args.claudeDir || undefined });
+const CONFIG = path.resolve(args.configFile || path.join(ROOT, 'config.json'));
+const P = source.locate({ claudeDir: args.claudeDir || undefined, extraDirs: readConfig(CONFIG).claudeDirs });
 const DATA = path.resolve(args.dataDir || path.join(ROOT, 'data'));
 const CATALOG = path.resolve(args.catalogFile || path.join(ROOT, 'tools-catalog.json'));
 const READ_ONLY = args.readOnly;
@@ -130,7 +132,8 @@ function collected() {
 async function brainNow() {
   const c = await collected();
   const d = details.current();
-  return { c, B: await buildBrain(c.sess, { dataDir: DATA, total: c.total, team: c.team, spend: d ? spendOf(d) : null, pricesAsOf: (PRICES && PRICES.as_of) || '', now: Date.now() }) };
+  const cfg = readConfig(CONFIG);
+  return { c, B: await buildBrain(c.sess, { dataDir: DATA, total: c.total, team: c.team, spend: d ? spendOf(d) : null, pricesAsOf: (PRICES && PRICES.as_of) || '', names: cfg.projectNames, groups: cfg.jobGroups, now: Date.now() }) };
 }
 
 const GET_ROUTES = {
@@ -146,6 +149,7 @@ const POST_ROUTES = {
   '/api/team': (body) => setTeam(body, { agentsDir: P.agentsDir, logFile: path.join(DATA, 'team-changes.jsonl') }),
   '/api/seen': (body) => markSeen(path.join(DATA, 'seen.jsonl'), body),
   '/api/park': (body) => markPark(path.join(DATA, 'parked.jsonl'), body),
+  '/api/name': async (body) => setProjectName(CONFIG, body, new Set((await brainNow()).B.projects.map((p) => p.base))),
 };
 
 async function handle(req, res) {

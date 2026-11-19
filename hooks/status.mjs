@@ -7,6 +7,8 @@
 //   node hooks/status.mjs --hook running|idle|awaiting          from the hooks (see hooks/README.md)
 //   node hooks/status.mjs --state awaiting|waiting|running|idle by hand, inside a session
 //   node hooks/status.mjs --task "<2-6 words>"                   a short label for the session (48 characters at most)
+//   node hooks/status.mjs --job "<Job>" --outcome "<one line>"    what a job came to, in the lead's own words (80 characters
+//                                                                at most), kept in <data>/outcomes.jsonl; "" takes it away
 //   node hooks/status.mjs --print-install                        the settings block for the three hooks
 // Options: --session <id> (else CLAUDE_SESSION_ID, else this folder's newest transcript), --claude <dir>, --data <dir>.
 import fs from 'node:fs';
@@ -60,6 +62,15 @@ export function writeLive(dataDir, session, change = {}, now = Date.now()) {
   return { file, value: next };
 }
 
+/** Appends one outcome line {at, session, job, outcome} to <data>/outcomes.jsonl. -> the line */
+export function writeOutcome(dataDir, session, job, outcome, now = Date.now()) {
+  if (!SID.test(session || '')) throw new Error('no session id');
+  const line = { at: new Date(now).toISOString(), session, job: clean(job, 48), outcome: clean(outcome, 80) };
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.appendFileSync(path.join(dataDir, 'outcomes.jsonl'), JSON.stringify(line) + '\n', 'utf8');
+  return line;
+}
+
 /** The hook's stdin JSON -> {session, type} or null. Nothing else is kept. */
 function hookInput(text) {
   let o = null;
@@ -77,6 +88,7 @@ function installSnippet(scriptPath = fileURLToPath(import.meta.url)) {
 
 function arg(argv, name) { const i = argv.indexOf(name); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : null; }
 const USAGE = 'usage: node hooks/status.mjs --state awaiting|waiting|running|idle [--task "<2-6 words>"] [--session <id>] [--claude <dir>] [--data <dir>]\n'
+  + '       node hooks/status.mjs --job "<Job>" --outcome "<one line, 80 characters at most>" [--session <id>] [--data <dir>]\n'
   + '       node hooks/status.mjs --hook running|idle|awaiting   (from the hooks)\n'
   + '       node hooks/status.mjs --print-install';
 
@@ -98,8 +110,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { st
     } catch { /* the session goes on */ }
     return 0;
   }
-  const state = arg(argv, '--state'), task = arg(argv, '--task');
-  if (state == null && task == null) { err(USAGE); return 2; }
+  const state = arg(argv, '--state'), task = arg(argv, '--task'), job = arg(argv, '--job');
+  const oi = argv.indexOf('--outcome'), outcome = oi >= 0 && oi + 1 < argv.length ? argv[oi + 1] : null;
+  if (state == null && task == null && job == null) { err(USAGE); return 2; }
+  if ((job == null) !== (outcome == null)) { err('an outcome line needs both --job "<Job>" and --outcome "<one line>"'); return 2; }
+  if (job != null && !clean(job, 48)) { err('the job name is empty'); return 2; }
   if (state != null && !STATES.includes(state)) { err('the state is awaiting, waiting, running or idle'); return 2; }
   if (task != null && !clean(task, 48)) { err('the task label is empty'); return 2; }
   const claude = arg(argv, '--claude') || env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -108,8 +123,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, { st
   const change = {};
   if (state != null) { change.state = state; change.sticky = state === 'awaiting' || state === 'waiting'; }
   if (task != null) change.task = task;
-  writeLive(dataDir, session, change);
-  out('status saved');
+  if (state != null || task != null) writeLive(dataDir, session, change);
+  if (job != null) writeOutcome(dataDir, session, job, outcome);
+  out(job != null ? 'outcome saved' : 'status saved');
   return 0;
 }
 

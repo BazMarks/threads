@@ -20,7 +20,7 @@ test('server: empty home', async () => {
     const B = (await s.get('/api/brain')).json;
     assert.equal(B.empty, true);
     assert.deepEqual(B.nodes, []);
-    assert.deepEqual(B.counts, { run: 0, await: 0, wait: 0, idle: 0, done: 0 });
+    assert.deepEqual(B.counts, { run: 0, await: 0, wait: 0, idle: 0, done: 0, check: 0 });
     const T = (await s.get('/api/tools')).json;
     for (const k of ['skills', 'helpers', 'mcp', 'hooks', 'commands', 'plugins', 'own']) assert.deepEqual(T[k], [], k);
     assert.deepEqual((await s.get('/api/team')).json.helpers, []);
@@ -90,5 +90,7 @@ test('server: guards', async () => {
   const ro = await startServer({ ...h, args: ['--read-only'] });
   try {
     assert.equal((await ro.post('/api/seen', { id: nodeId(h.ids.A2) })).status, 403);
+    assert.equal((await ro.post('/api/name', { label: 'beta', name: 'Bob' })).status, 403);
+    assert.ok(!fs.existsSync(ro.configFile), 'read-only writes no config');
   } finally { await ro.stop(); }
 });

@@ -56,7 +56,7 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
   const workDir = path.join(root, 'work');
   fs.mkdirSync(claudeDir, { recursive: true });
   fs.mkdirSync(dataDir, { recursive: true });
-  const out = { claudeDir, dataDir, workDir, ids: {}, CANARY: {}, toolUseIds: [], folders: [], responses: 0 };
+  const out = { claudeDir, dataDir, workDir, ids: {}, CANARY: {}, toolUseIds: [], folders: [], helperFiles: [], responses: 0 };
   if (empty) return out;
   const hex = () => crypto.randomBytes(3).toString('hex');
   const C = (where) => (out.CANARY[where] = `CANARY_${where.toUpperCase()}_${hex()}`);
@@ -103,7 +103,10 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
       assistantLine(hc, now - 3 * MIN, { model: 'claude-sonnet-4-5', effort: 'high', content: [toolUse('Grep', { pattern: 'x' }, tid('A1hgrep'))] }),
       assistantLine(hc, now - MIN, { model: 'claude-sonnet-4-5', effort: 'high', content: [{ type: 'text', text: 'ok' }] }),
     ], now - MIN), now - MIN);
-    writeText(hfile.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType: 'reviewer', description: `review ${C('meta')}`, toolUseId: agentId, finished: false, model: 'sonnet', effort: 'high' }));
+    out.helperFiles.push('a1b2c3d4e5f60718');
+    // the description is the job's label; every other field stays on the server
+    writeText(hfile.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType: 'reviewer', description: 'review the login change', toolUseId: agentId, finished: false, model: 'sonnet', effort: 'high',
+      prompt: `look again ${C('meta')}`, requestShape: { body: C('metashape') } }));
   }
   // A2: headless, sonnet, two turns, quiet for 25 minutes
   {
@@ -153,7 +156,65 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
     return c;
   };
   live(simple('B1', 5).session, 'awaiting', now - 4 * MIN);
-  live(simple('B2', 2).session, 'awaiting', now - 10 * MIN);
+  {
+    // B2 drives four jobs: a maker that waits on its own Blender render in the background, a finished planner with a
+    // long label, a finished builder with no label at all, and "Gallery", two finished helpers named "<Job>: <step>"
+    const c = simple('B2', 2);
+    live(c.session, 'awaiting', now - 10 * MIN);
+    const job = (hex, meta, lines, mtime) => {
+      const hfile = path.join(c.sub, `agent-${hex}.jsonl`);
+      out.helperFiles.push(hex);
+      writeLines(hfile, track(lines, mtime), mtime);
+      writeText(hfile.replace(/\.jsonl$/, '.meta.json'), JSON.stringify(meta));
+    };
+    const hc = { ...c, side: true };
+    const bgId = tid('B2render');
+    job('b2c3d4e5f6071829', { agentType: 'maker', description: 'Blender recreation, 6 variations', toolUseId: C('metatooluse'), model: 'opus', requestShape: { q: C('metarequest') } }, [
+      userLine(hc, now - 50 * MIN, `make it ${C('jobprompt')}`),
+      assistantLine(hc, now - 45 * MIN, { effort: 'high', content: [toolUse('Bash', { command: `cd "${path.join(root, `shots-${C('bgpath')}`)}" && nohup /Applications/Blender.app/Contents/MacOS/Blender -b scene.blend --python "${path.join(root, 'scripts', 'render_steps.py')}" -- --seed ${C('bgarg')} &`, run_in_background: true }, bgId)] }),
+      toolResult(hc, now - 45 * MIN + 1000, bgId, `Command running in background with ID: bg2 ${C('bgresult')}`),
+      assistantLine(hc, now - 30 * MIN, { effort: 'high', content: [{ type: 'text', text: `waiting on the render ${C('jobreply')}` }] }),
+    ], now - 30 * MIN);
+    job('c3d4e5f607182930', { agentType: 'planner', description: `Plan the \u0007 Threads job cards ${'z'.repeat(60)}`, toolUseId: tid('B2plan'), finished: true, model: 'opus' }, [
+      userLine(hc, now - 90 * MIN, 'plan'),
+      assistantLine(hc, now - 80 * MIN, { content: [{ type: 'text', text: 'plan' }] }),
+    ], now - 80 * MIN);
+    job('d4e5f60718293041', { agentType: 'builder', toolUseId: tid('B2build'), finished: true }, [
+      userLine(hc, now - 70 * MIN, 'build'),
+      assistantLine(hc, now - 60 * MIN, { model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'built' }] }),
+    ], now - 60 * MIN);
+    // Gallery: what its helpers did is counted (tool names, a script file name, files written, failed calls); the
+    // paths, arguments, file contents and results below hold canaries
+    {
+      const page = path.join(root, `site-${C('didpath')}`, 'index.html');
+      const runId = tid('B2galrun');
+      job('e5f6071829304152', { agentType: 'builder', description: 'Gallery: build pages', toolUseId: tid('B2gal1'), finished: true }, [
+        userLine(hc, now - 58 * MIN, `build ${C('didprompt')}`),
+        assistantLine(hc, now - 57 * MIN, { model: 'claude-sonnet-4-5', content: [
+          toolUse('Write', { file_path: page, content: `page ${C('didcontent')}` }, tid('B2galw1')),
+          toolUse('Edit', { file_path: page, old_string: 'a', new_string: C('didedit') }, tid('B2galw2')),
+          toolUse('Write', { file_path: path.join(root, 'site', 'two.html'), content: 'x' }, tid('B2galw3')),
+          toolUse('Bash', { command: `cd "${path.join(root, `site-${C('didcwd')}`)}" && python3 "${path.join(root, 'scripts', 'build_pages.py')}" --token ${C('didarg')}` }, runId),
+          toolUse('Bash', { command: `cat notes-${C('didcat')}.py` }, tid('B2galcat')),
+          toolUse('Skill', { skill: 'demo-skill', args: C('didskill') }, tid('B2galskill')),
+          toolUse('mcp__fixture_mcp__ping', { q: C('didmcp') }, tid('B2galmcp'))] }),
+        { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: runId, is_error: true, content: `Traceback ${C('diderror')}` }] }, ...base(hc, now - 56 * MIN) },
+        assistantLine(hc, now - 55 * MIN, { model: 'claude-sonnet-4-5', content: [{ type: 'text', text: `built ${C('didreply')}` }] }),
+      ], now - 55 * MIN);
+      job('f607182930415263', { agentType: 'auditor', description: 'gallery: check links', toolUseId: tid('B2gal2'), finished: true }, [
+        userLine(hc, now - 54 * MIN, 'check'),
+        assistantLine(hc, now - 53 * MIN, { content: [toolUse('Read', { file_path: page }, tid('B2galread'))] }),
+        assistantLine(hc, now - 52 * MIN, { content: [{ type: 'text', text: 'all good' }] }),
+      ], now - 52 * MIN);
+      // the lead's own outcome lines: the newest for a job wins; no other key, job or session reaches the page
+      writeText(path.join(dataDir, 'outcomes.jsonl'), [
+        { at: iso(now - 51 * MIN), session: c.session, job: 'gallery', outcome: 'first try', note: C('outcomenote') },
+        { at: iso(now - 50 * MIN), session: c.session, job: 'Gallery', outcome: '6 pages built,\u0007 links checked', prompt: C('outcomekey') },
+        { at: iso(now - 50 * MIN), session: c.session, job: 'no such job', outcome: `never shown ${C('outcomejob')}` },
+        { at: iso(now - 50 * MIN), session: sid(987654), job: 'gallery', outcome: `another session ${C('outcomesession')}` },
+      ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+    }
+  }
   live(simple('B3', 300, 'claude-fable-5').session, 'idle', now - 300 * MIN);
   live(simple('B4', 20).session, 'waiting', now - 20 * MIN, { sticky: true, task: 'tidy the test data' });
   // B5: twenty days old; a skill and an MCP call (counted by the tool usage only)
@@ -164,7 +225,7 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
   }
   if (twin) {
     const p = proj('nested/alpha');
-    const c = session('T1', p);
+    const c = session('T1', p, 'claude-desktop'); // a session of the desktop app's own Claude Code
     const last = now - 30 * MIN;
     writeLines(c.file, track([userLine(c, last - MIN, 'q'), assistantLine(c, last, { content: [{ type: 'text', text: 'a' }] })], last), last);
   }
@@ -213,5 +274,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   if (!dir) { console.error('usage: node test/fixtures.mjs <dir>'); process.exit(2); }
   const h = makeHome(path.resolve(dir), Date.now(), { twin: true });
   const server = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.mjs');
-  console.log(`node "${path.relative(process.cwd(), server) || 'server.mjs'}" --claude "${h.claudeDir}" --data "${h.dataDir}"`);
+  // a display name for one project, as a user's own config.json would hold it
+  const config = path.join(path.resolve(dir), 'config.json');
+  writeText(config, JSON.stringify({ projectNames: { beta: 'Bob' }, jobGroups: { 'Blender recreation, 6 variations': 'Mint video' } }, null, 2));
+  console.log(`node "${path.relative(process.cwd(), server) || 'server.mjs'}" --claude "${h.claudeDir}" --data "${h.dataDir}" --config "${config}"`);
 }

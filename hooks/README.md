@@ -39,7 +39,14 @@ node hooks/status.mjs --state waiting          # waiting on something outside th
 node hooks/status.mjs --state awaiting         # needs you; stays until the next prompt
 node hooks/status.mjs --state running
 node hooks/status.mjs --task "fix the login"   # a short label for the node (48 characters at most)
+node hooks/status.mjs --job "Gallery" --outcome "6 pages built, links checked"
 ```
+
+The last line is a job's **outcome line**: what the job came to, in the lead session's own words (80 characters at
+most, control characters removed). `<Job>` is the job's name on its card: the text before the colon in its helpers'
+descriptions (`Gallery: build pages`), or the whole description when there is no colon; capitals do not matter. It
+shows on the job's card, in its "what it did" panel and in "done this week". Run it from the lead session, not from
+a helper. The newest line for a job wins; `--outcome ""` takes it away. Lines are kept in `data/outcomes.jsonl`.
 
 `--session <id>`, `--claude <dir>` and `--data <dir>` pick another session or folder (`THREADS_DATA` works too).
 
