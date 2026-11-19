@@ -31,7 +31,7 @@ test('leak: no canary, id, path or settings value in any answer', async () => {
   const wait = waitNearMidnight(Date.now());
   if (wait) await new Promise((r) => setTimeout(r, wait));
   const root = tmpDir();
-  const h = makeHome(root, Date.now(), { twin: true, many: 3, marks: true });
+  const h = makeHome(root, Date.now(), { twin: true, many: 3, marks: true, bgdone: true });
   // a job group for a description no helper has never reaches the page, key or value
   const configText = JSON.stringify({ jobGroups: { 'Blender recreation, 6 variations': 'Mint video', 'not a helper CANARY_GROUPKEY': 'CANARY_GROUPJOB' }, other: 'CANARY_CONFIG' });
   const opened = path.join(tmpDir(), 'opened.txt');

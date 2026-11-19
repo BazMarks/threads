@@ -50,7 +50,7 @@ function writeText(file, text, mtime = null) {
  * Writes the home under root. -> {claudeDir, dataDir, workDir, ids, CANARY, toolUseIds, folders, responses}
  * ids: {A1..A6, B1..B5, T1?, G1..}; CANARY: {where: string}; responses: unique response ids in the last 15 days.
  */
-export function makeHome(root, now = Date.now(), { empty = false, twin = false, many = 0, marks = false } = {}) {
+export function makeHome(root, now = Date.now(), { empty = false, twin = false, many = 0, marks = false, bgdone = false } = {}) {
   const claudeDir = path.join(root, 'home', '.claude');
   const dataDir = path.join(root, 'data');
   const workDir = path.join(root, 'work');
@@ -183,6 +183,22 @@ export function makeHome(root, now = Date.now(), { empty = false, twin = false, 
       userLine(hc, now - 70 * MIN, 'build'),
       assistantLine(hc, now - 60 * MIN, { model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'built' }] }),
     ], now - 60 * MIN);
+    // "Frames": a helper that ended its turn to wait on its own background render; Claude Code marks it finished
+    // while the render runs. A second one's render was launched over BG_MAX_MS ago with no notice: it ages out.
+    if (bgdone) {
+      const fid = tid('B2frames'), oid = tid('B2oldframes');
+      job('0718293041526374', { agentType: 'builder', description: 'Frames: render V7', toolUseId: tid('B2fr1'), finished: true, model: 'opus' }, [
+        userLine(hc, now - 20 * MIN, `render ${C('frprompt')}`),
+        assistantLine(hc, now - 15 * MIN, { content: [toolUse('Bash', { command: `cd "${path.join(root, `frames-${C('frpath')}`)}" && blender -b v7.blend --python "${path.join(root, 'scripts', 'render_frames.py')}" -- --out ${C('frarg')}`, description: `render ${C('frdesc')}`, run_in_background: true }, fid)] }),
+        toolResult(hc, now - 15 * MIN + 1000, fid, `Command running in background with ID: bg7 ${C('frresult')}`),
+        assistantLine(hc, now - 14 * MIN, { content: [{ type: 'text', text: `waiting ${C('frreply')}` }] }),
+      ], now - 14 * MIN);
+      job('1829304152637485', { agentType: 'builder', description: 'Old frames: render', toolUseId: tid('B2fr2'), finished: true }, [
+        userLine(hc, now - 200 * MIN, 'render'),
+        assistantLine(hc, now - 190 * MIN, { content: [toolUse('Bash', { command: 'blender -b old.blend --python old_frames.py', run_in_background: true }, oid)] }),
+        toolResult(hc, now - 190 * MIN + 1000, oid, 'Command running in background with ID: bg8'),
+      ], now - 190 * MIN);
+    }
     // Gallery: what its helpers did is counted (tool names, a script file name, files written, failed calls); the
     // paths, arguments, file contents and results below hold canaries
     {

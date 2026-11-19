@@ -643,6 +643,19 @@ test('jobs: a job that waits on its own background render is running and shows i
   assert.ok(maker.bgw[0].since < NOW);
   assert.equal(node('A3').bgw[0].tool, 'Bash', 'the lead shows its own background command');
 });
+test('jobs: a finished helper whose background render is still out is running; a stale one ages out', async () => {
+  const { node, B } = await brainOf({ h: makeHome(tmpDir(), NOW, { bgdone: true }) });
+  const fr = B.jobs.find((x) => x.parent === node('B2').id && x.job === 'Frames');
+  assert.equal(fr.st, 'run'); assert.equal(fr.bg, 1); assert.equal(fr.nDone, 0);
+  assert.deepEqual(fr.helpers.map((x) => x.st), ['run']);
+  assert.deepEqual(fr.bgw.map((x) => Object.keys(x).sort()), [['prog', 'script', 'since', 'tool']]);
+  assert.deepEqual(fr.bgw.map((x) => [x.tool, x.prog, x.script]), [['Bash', 'blender', 'render_frames.py']]);
+  assert.ok(fr.bgw[0].since < NOW && NOW - fr.bgw[0].since < 20 * 60000);
+  const old = B.jobs.find((x) => x.parent === node('B2').id && x.job === 'Old frames');
+  assert.equal(old.st, 'done', 'a background command past BG_MAX_MS no longer keeps it running'); assert.equal(old.bgw, undefined);
+  const s = JSON.stringify(B);
+  for (const w of ['frprompt', 'frpath', 'frarg', 'frdesc', 'frresult', 'frreply']) assert.ok(!s.includes(`CANARY_${w.toUpperCase()}_`), w);
+});
 test('jobs: Got it removes a done job and counts it in done this week; Park takes one off the tree', async () => {
   const h = makeHome(tmpDir(), NOW);
   const r0 = await brainOf({ h });
@@ -710,7 +723,8 @@ test('hooks: --job with --outcome appends the lead\'s line; one without the othe
 test('jobs: helperState, jobState, jobSeen and jobOf', () => {
   assert.equal(helperState({ idleSec: 60 }), 'run');
   assert.equal(helperState({ idleSec: 3600, bg: 1 }), 'run');
-  assert.equal(helperState({ finished: true, idleSec: 1, bg: 1 }), 'done', 'finished is done at once');
+  assert.equal(helperState({ finished: true, idleSec: 1 }), 'done', 'finished is done at once');
+  assert.equal(helperState({ finished: true, idleSec: 3600, bg: 1 }), 'run', 'finished but its background command is still out');
   assert.equal(helperState({ idleSec: 3600 }), 'idle', 'stopped without the finished mark');
   assert.equal(jobState(['done', 'done']), 'done');
   assert.equal(jobState(['done', 'idle']), 'idle');
